@@ -1,0 +1,1 @@
+# Quiz Night uses only Python's standard library; there are no third-party packages.

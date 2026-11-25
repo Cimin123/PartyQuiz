@@ -1,0 +1,68 @@
+{
+  "title": "Quick Mix",
+  "questions": [
+    {
+      "question": "Which planet is known as the Red Planet?",
+      "answers": [
+        { "text": "Venus" },
+        { "text": "Mars", "correct": true },
+        { "text": "Jupiter" },
+        { "text": "Mercury" }
+      ]
+    },
+    {
+      "question": "How many sides does a hexagon have?",
+      "answers": [
+        { "text": "Five" },
+        { "text": "Six", "correct": true },
+        { "text": "Seven" },
+        { "text": "Eight" }
+      ]
+    },
+    {
+      "question": "What is the largest ocean on Earth?",
+      "answers": [
+        { "text": "Atlantic Ocean" },
+        { "text": "Indian Ocean" },
+        { "text": "Pacific Ocean", "correct": true },
+        { "text": "Arctic Ocean" }
+      ]
+    },
+    {
+      "question": "Which instrument has keys, pedals, and strings?",
+      "answers": [
+        { "text": "Piano", "correct": true },
+        { "text": "Flute" },
+        { "text": "Drum kit" },
+        { "text": "Trumpet" }
+      ]
+    },
+    {
+      "question": "What is the capital city of Japan?",
+      "answers": [
+        { "text": "Kyoto" },
+        { "text": "Osaka" },
+        { "text": "Tokyo", "correct": true },
+        { "text": "Hiroshima" }
+      ]
+    },
+    {
+      "question": "Which animal is the tallest in the world?",
+      "answers": [
+        { "text": "Elephant" },
+        { "text": "Giraffe", "correct": true },
+        { "text": "Ostrich" },
+        { "text": "Camel" }
+      ]
+    },
+    {
+      "question": "How many colors are traditionally named in a rainbow?",
+      "answers": [
+        { "text": "Five" },
+        { "text": "Six" },
+        { "text": "Seven", "correct": true },
+        { "text": "Eight" }
+      ]
+    }
+  ]
+}
