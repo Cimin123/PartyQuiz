@@ -72,15 +72,15 @@ function renderHome() {
   const hostCard = element("section", "card");
   hostCard.append(element("p", "eyebrow", "FOR THE HOST"));
   hostCard.append(element("h2", "", "Start a new game"));
-  hostCard.append(element("p", "muted", "Upload a quiz JSON file, create a room, and share its code."));
+  hostCard.append(element("p", "muted", "Upload a quiz JSON or CSV file, create a room, and share its code."));
   const hostForm = document.createElement("form");
   hostForm.className = "form";
   const fileLabel = element("label", "field");
-  fileLabel.append(element("span", "", "Quiz file (.json)"));
+  fileLabel.append(element("span", "", "Quiz file (.json or .csv)"));
   const file = document.createElement("input");
   file.name = "quiz";
   file.type = "file";
-  file.accept = ".json,application/json";
+  file.accept = ".json,.csv,application/json,text/csv";
   file.required = true;
   fileLabel.append(file);
   hostForm.append(fileLabel);
@@ -103,16 +103,26 @@ function renderHome() {
     hostSubmit.disabled = true;
     try {
       const selectedFile = file.files[0];
-      if (!selectedFile) throw new Error("Choose a quiz JSON file first.");
-      const quiz = JSON.parse(await selectedFile.text());
-      const result = await request("/api/rooms", { quiz, mode: modeSelect.value });
+      if (!selectedFile) throw new Error("Choose a quiz JSON or CSV file first.");
+      let result;
+      if (selectedFile.name.toLowerCase().endsWith(".csv")) {
+        const title = selectedFile.name.replace(/\.[^.]+$/, "").slice(0, 100);
+        result = await request("/api/rooms", {
+          quiz_csv: await selectedFile.text(),
+          quiz_title: title || "Imported Quiz",
+          mode: modeSelect.value
+        });
+      } else {
+        const quiz = JSON.parse(await selectedFile.text());
+        result = await request("/api/rooms", { quiz, mode: modeSelect.value });
+      }
       activeRoom = result.room_code;
       hostToken = result.host_token;
       role = "host";
       sessionStorage.setItem(storageKeys.room, activeRoom);
       sessionStorage.setItem(storageKeys.role, role);
       sessionStorage.setItem(storageKeys.host, hostToken);
-      renderLobby();
+      renderLobby(result.import_warnings || []);
     } catch (error) {
       showError(error.message);
     } finally {
@@ -167,7 +177,7 @@ function renderHome() {
   screen.append(columns);
 }
 
-function renderLobby() {
+function renderLobby(importWarnings = []) {
   screen.replaceChildren();
   const card = element("section", "card lobby-card");
   card.append(element("p", "eyebrow", "YOUR GAME IS READY"));
@@ -176,6 +186,15 @@ function renderLobby() {
   card.append(code);
   card.append(element("p", "muted", "Players on the same Wi-Fi can open this page and enter the code."));
   card.append(element("p", "invite-link", "Open the LAN address printed in the terminal, then enter this code."));
+  if (importWarnings.length) {
+    const report = element("details", "import-report");
+    const rowLabel = importWarnings.length === 1 ? "row was" : "rows were";
+    report.append(element("summary", "", `${importWarnings.length} CSV ${rowLabel} skipped. Expand to see why.`));
+    const warningList = element("ul", "");
+    importWarnings.forEach(warning => warningList.append(element("li", "", warning)));
+    report.append(warningList);
+    card.append(report);
+  }
   card.append(button("Copy room code", "outline", async () => {
     try {
       await navigator.clipboard.writeText(activeRoom);
@@ -240,6 +259,7 @@ function renderQuestion(state) {
   meta.append(element("p", "eyebrow", "QUESTION " + question.number + " / " + question.total));
   const answeredCount = state.players.filter(player => player.has_answered).length;
   meta.append(element("span", "answer-count", answeredCount + " / " + state.player_count + " answered"));
+  if (question.category) meta.insertBefore(element("span", "category-tag", question.category), meta.lastChild);
   section.append(meta);
   section.append(element("h2", "question-text", question.text));
 

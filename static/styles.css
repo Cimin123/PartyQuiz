@@ -68,6 +68,9 @@ h2 { margin-bottom: 12px; font-size: 23px; line-height: 1.15; letter-spacing: -.
 .lobby-card > h1 { font-size: clamp(32px, 6vw, 48px); }
 .room-code { display: inline-block; margin: 4px 0 16px; border-radius: 12px; background: var(--lime); padding: 10px 22px 12px; font-family: Consolas, "Courier New", monospace; font-size: clamp(39px, 9vw, 60px); font-weight: 500; letter-spacing: .18em; }
 .invite-link { max-width: 100%; overflow-wrap: anywhere; color: var(--green); font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+.import-report { margin: 16px 0; border: 1px solid #e8c99a; border-radius: 8px; background: #fff8e9; padding: 12px 14px; color: #765a26; font-size: 12px; }
+.import-report summary { cursor: pointer; font-weight: 700; }
+.import-report ul { display: grid; gap: 5px; margin: 10px 0 0; padding-left: 18px; }
 .waiting-players { margin: 28px 0 20px; }
 .waiting-players h2, .scoreboard h2 { font-size: 17px; }
 .host-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
@@ -78,6 +81,7 @@ h2 { margin-bottom: 12px; font-size: 23px; line-height: 1.15; letter-spacing: -.
 .game-card h2 { font-size: clamp(23px, 4vw, 34px); }
 .question-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 20px; }
 .question-meta .eyebrow { margin: 0; }
+.category-tag { margin-right: auto; border-radius: 100px; background: #edf0e3; padding: 5px 9px; color: #626950; font-size: 10px; }
 .answer-count { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .question-text { max-width: 650px; margin-bottom: 25px; }
 .answer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

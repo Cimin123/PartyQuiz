@@ -1,8 +1,11 @@
+import csv
+import io
 import json
 import secrets
 import socket
 import sys
 import threading
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -40,10 +43,20 @@ def validate_quiz(data):
             raise RequestError("Question {} must be an object.".format(question_number))
 
         prompt = question.get("question")
+        category = question.get("category")
         answers = question.get("answers")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 500:
             raise RequestError(
                 "Question {} must have text between 1 and 500 characters.".format(
+                    question_number
+                )
+            )
+        if category is not None and (
+            not isinstance(category, str)
+            or len(category.strip()) > 100
+        ):
+            raise RequestError(
+                "Category in question {} must be at most 100 characters.".format(
                     question_number
                 )
             )
@@ -82,11 +95,166 @@ def validate_quiz(data):
                     question_number
                 )
             )
-        validated_questions.append(
-            {"question": prompt.strip(), "answers": validated_answers}
-        )
+        validated_question = {
+            "question": prompt.strip(),
+            "answers": validated_answers,
+        }
+        if category and category.strip():
+            validated_question["category"] = category.strip()
+        validated_questions.append(validated_question)
 
     return {"title": title.strip(), "questions": validated_questions}
+
+
+def parse_csv_quiz(content, title):
+    if not isinstance(content, str) or not content.strip():
+        raise RequestError("CSV file is empty.")
+
+    sample = content[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+
+    reader = csv.DictReader(io.StringIO(content.lstrip("\ufeff")), dialect=dialect)
+    if not reader.fieldnames:
+        raise RequestError("CSV file must include a header row.")
+
+    def normalize_header(header):
+        return " ".join(unicodedata.normalize("NFKC", header).casefold().split())
+
+    headers = {}
+    for header in reader.fieldnames:
+        normalized = normalize_header(header or "")
+        if not normalized:
+            continue
+        if normalized in headers:
+            raise RequestError("CSV contains duplicate column headers.")
+        headers[normalized] = header
+
+    question_header = next(
+        (headers[name] for name in ("pytanie", "question") if name in headers),
+        None,
+    )
+    correct_header = next(
+        (
+            headers[name]
+            for name in (
+                "poprawna odp",
+                "poprawna odpowiedź",
+                "correct answer",
+                "correct",
+            )
+            if name in headers
+        ),
+        None,
+    )
+    category_header = next(
+        (headers[name] for name in ("kategoria", "category") if name in headers),
+        None,
+    )
+    answer_headers = [
+        headers[letter]
+        for letter in "abcde"
+        if letter in headers
+    ]
+    include_header = headers.get("include")
+
+    if question_header is None or correct_header is None:
+        raise RequestError(
+            "CSV needs a Question/Pytanie column and a Correct/Poprawna odp column."
+        )
+    if len(answer_headers) < 2:
+        raise RequestError("CSV needs at least two answer columns named A, B, C, D, or E.")
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 100:
+        raise RequestError("Quiz title must be between 1 and 100 characters.")
+
+    questions = []
+    warnings = []
+    try:
+        rows = list(reader)
+    except csv.Error as error:
+        raise RequestError("CSV could not be parsed: {}".format(error))
+
+    for row_number, row in enumerate(rows, start=2):
+        if None in row:
+            warnings.append(
+                "CSV row {} skipped: it has more values than the header.".format(
+                    row_number
+                )
+            )
+            continue
+
+        values = [value for value in row.values() if value is not None]
+        if not any(value.strip() for value in values):
+            continue
+
+        if include_header is not None:
+            include_value = (row.get(include_header) or "").strip().casefold()
+            if include_value in ("0", "false", "no", "n", "nie"):
+                continue
+
+        prompt = (row.get(question_header) or "").strip()
+        if not prompt:
+            warnings.append(
+                "CSV row {} skipped: the question is blank.".format(row_number)
+            )
+            continue
+
+        correct_text = (row.get(correct_header) or "").strip()
+        if not correct_text:
+            warnings.append(
+                "CSV row {} skipped: the correct answer is blank.".format(row_number)
+            )
+            continue
+
+        answer_texts = [
+            (row.get(header) or "").strip() or "x" for header in answer_headers
+        ]
+        matches = [
+            index
+            for index, answer in enumerate(answer_texts)
+            if answer.casefold() == correct_text.casefold()
+        ]
+        if len(matches) != 1:
+            warnings.append(
+                "CSV row {} skipped: the correct answer must match exactly one answer choice.".format(
+                    row_number
+                )
+            )
+            continue
+
+        question = {
+            "question": prompt,
+            "answers": [
+                {"text": answer, "correct": index == matches[0]}
+                for index, answer in enumerate(answer_texts)
+            ],
+        }
+        category = (row.get(category_header) or "").strip() if category_header else ""
+        if category:
+            question["category"] = category
+        try:
+            validated = validate_quiz(
+                {"title": title.strip(), "questions": [question]}
+            )
+        except RequestError as error:
+            warnings.append(
+                "CSV row {} skipped: {}.".format(row_number, error)
+            )
+            continue
+        questions.extend(validated["questions"])
+
+    if not questions:
+        details = " ".join(warnings[:3])
+        if len(warnings) > 3:
+            details += " And {} more row(s) were skipped.".format(len(warnings) - 3)
+        message = "CSV contains no valid questions."
+        if details:
+            message += " " + details
+        raise RequestError(message)
+
+    return {"title": title.strip(), "questions": questions}, warnings
 
 
 class QuizRoom:
@@ -114,6 +282,8 @@ class QuizRoom:
                     "text": current["question"],
                     "answers": [answer["text"] for answer in current["answers"]],
                 }
+                if current.get("category"):
+                    question["category"] = current["category"]
                 if self.phase == "revealed":
                     correct_answer_index = next(
                         index
@@ -239,10 +409,14 @@ class QuizRoom:
         self.phase = "question"
 
 
-def create_room(quiz_data, mode="manual"):
-    quiz = validate_quiz(quiz_data)
+def create_room(quiz_data=None, mode="manual", csv_content=None, quiz_title=None):
     if mode not in ("manual", "auto"):
         raise RequestError("Game mode must be 'manual' or 'auto'.")
+    if csv_content is None:
+        quiz = validate_quiz(quiz_data)
+        import_warnings = []
+    else:
+        quiz, import_warnings = parse_csv_quiz(csv_content, quiz_title)
     with ROOMS_LOCK:
         for _ in range(10):
             code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(5))
@@ -252,7 +426,7 @@ def create_room(quiz_data, mode="manual"):
             raise RequestError("Could not create a room. Please try again.", 503)
         host_token = secrets.token_urlsafe(32)
         ROOMS[code] = QuizRoom(code, quiz, host_token, mode)
-    return code, host_token
+    return code, host_token, import_warnings
 
 
 def get_room(code):
@@ -304,9 +478,23 @@ class QuizRequestHandler(BaseHTTPRequestHandler):
         try:
             data = self.read_json()
             if self.path == "/api/rooms":
-                code, host_token = create_room(data.get("quiz"), data.get("mode", "manual"))
+                if "quiz_csv" in data:
+                    code, host_token, import_warnings = create_room(
+                        mode=data.get("mode", "manual"),
+                        csv_content=data.get("quiz_csv"),
+                        quiz_title=data.get("quiz_title"),
+                    )
+                else:
+                    code, host_token, import_warnings = create_room(
+                        data.get("quiz"), data.get("mode", "manual")
+                    )
                 self.send_json(
-                    201, {"room_code": code, "host_token": host_token}
+                    201,
+                    {
+                        "room_code": code,
+                        "host_token": host_token,
+                        "import_warnings": import_warnings,
+                    },
                 )
             elif self.path == "/api/join":
                 code = self.required_string(data, "room_code", 5)

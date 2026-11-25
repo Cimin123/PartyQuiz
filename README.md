@@ -1,6 +1,6 @@
 # Quiz Night
 
-A small, local-network party quiz. The host chooses a JSON quiz file, starts a room, and shares the room code. Players join from a browser on the same Wi-Fi. Everyone's screen updates together. Choose host-controlled play (manual reveal and advance) or automatic play (reveal when every player has answered, then advance after three seconds).
+A small, local-network party quiz. The host chooses a JSON or CSV quiz file, starts a room, and shares the room code. Players join from a browser on the same Wi-Fi. Everyone's screen updates together. Choose host-controlled play (manual reveal and advance) or automatic play (reveal when every player has answered, then advance after three seconds).
 
 ## Run it
 
@@ -35,3 +35,7 @@ Start with [sample_quiz.json](sample_quiz.json). A quiz has a title and 1–100 
 ```
 
 Each correct answer earns one point. In automatic mode, all players need to answer before the result is revealed and the three-second transition begins. When the game ends, both the host and players can return to the start screen to create or join another game.
+
+## Quiz CSV format
+
+The host can also import a comma-separated CSV with headers `Pytanie` (or `Question`), `A`–`E`, and `Poprawna odp` (or `Correct answer`). An optional `Kategoria`/`Category` column is shown with each question. An optional `Include` column can exclude rows by setting it to `0`, `false`, `no`, or `nie`. Empty answer cells become `x`. Rows without a question or a correct answer matching exactly one choice are skipped and reported in the lobby. JSON import remains supported.

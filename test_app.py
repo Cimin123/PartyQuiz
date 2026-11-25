@@ -11,6 +11,7 @@ from app import (
     QuizRequestHandler,
     QuizRoom,
     RequestError,
+    parse_csv_quiz,
     validate_quiz,
 )
 
@@ -27,6 +28,13 @@ VALID_QUIZ = {
         }
     ],
 }
+
+SAMPLE_CSV = (
+    "\ufeffKategoria,Pytanie,A,B,C,D,E,Poprawna odp,Include\n"
+    'Mix,"Question, with a comma",Alpha,,Charlie,,,Alpha,1\n'
+    "Mix,Missing correct,A,B,,,,,1\n"
+    "Mix,Excluded,A,B,,,,A,0\n"
+)
 
 
 class QuizValidationTests(unittest.TestCase):
@@ -47,6 +55,27 @@ class QuizValidationTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(RequestError, "exactly one"):
             validate_quiz(quiz)
+
+    def test_csv_import_fills_blank_choices_and_reports_skipped_rows(self):
+        quiz, warnings = parse_csv_quiz(SAMPLE_CSV, "CSV Test")
+
+        self.assertEqual(len(quiz["questions"]), 1)
+        self.assertEqual(quiz["questions"][0]["category"], "Mix")
+        self.assertEqual(
+            [answer["text"] for answer in quiz["questions"][0]["answers"]],
+            ["Alpha", "x", "Charlie", "x", "x"],
+        )
+        self.assertEqual(
+            [answer["correct"] for answer in quiz["questions"][0]["answers"]],
+            [True, False, False, False, False],
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("row 3 skipped: the correct answer is blank", warnings[0])
+
+    def test_csv_import_fails_when_no_rows_have_a_correct_answer(self):
+        csv_content = "Pytanie,A,B,Poprawna odp\nQuestion,A,B,\n"
+        with self.assertRaisesRegex(RequestError, "no valid questions"):
+            parse_csv_quiz(csv_content, "CSV Test")
 
 
 class QuizRoomTests(unittest.TestCase):
@@ -198,6 +227,18 @@ class QuizApiTests(unittest.TestCase):
         status, state = self.request("/api/state?room={}".format(room["room_code"]))
         self.assertEqual(status, 200)
         self.assertEqual(state["mode"], "auto")
+
+    def test_room_creation_accepts_csv_and_returns_import_warnings(self):
+        status, room = self.request(
+            "/api/rooms",
+            {"quiz_csv": SAMPLE_CSV, "quiz_title": "CSV Test", "mode": "manual"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(len(room["import_warnings"]), 1)
+        status, state = self.request("/api/state?room={}".format(room["room_code"]))
+        self.assertEqual(status, 200)
+        self.assertEqual(state["title"], "CSV Test")
+        self.assertEqual(state["phase"], "lobby")
 
 
 if __name__ == "__main__":
