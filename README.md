@@ -34,4 +34,4 @@ Start with [sample_quiz.json](sample_quiz.json). A quiz has a title and 1–100 
 }
 ```
 
-Each correct answer earns one point. In automatic mode, all players need to answer before the result is revealed and the three-second transition begins.
+Each correct answer earns one point. In automatic mode, all players need to answer before the result is revealed and the three-second transition begins. When the game ends, both the host and players can return to the start screen to create or join another game.

@@ -89,8 +89,8 @@ function renderHome() {
   const modeSelect = document.createElement("select");
   modeSelect.name = "mode";
   modeSelect.append(
-    new Option("Host controlled — reveal and advance manually", "manual"),
-    new Option("Automatic — reveal after everyone answers", "auto")
+    new Option("Automatic — reveal after everyone answers", "auto"),
+    new Option("Host controlled — reveal and advance manually", "manual")
   );
   modeLabel.append(modeSelect);
   modeLabel.append(element("span", "field-hint", "Automatic mode shows the answer, then moves on after 3 seconds."));
@@ -219,7 +219,7 @@ function renderGame(state) {
     section.append(element("p", "eyebrow", "THAT'S A WRAP"));
     section.append(element("h2", "", "Final scores"));
     addScoreboard(section, state.players);
-    if (role === "host") section.append(button("Back to start", "outline", leaveGame));
+    section.append(button("Back to start", "outline", leaveGame));
     screen.append(section);
   } else if (state.question) {
     renderQuestion(state);
@@ -246,7 +246,10 @@ function renderQuestion(state) {
   const answers = element("div", "answer-grid");
   question.answers.forEach((text, index) => {
     let style = "answer-option";
-    if (state.phase === "revealed" && index === state.correct_answer_index) style += " correct";
+    if (state.phase === "revealed") {
+      if (index === state.correct_answer_index) style += " correct";
+      else if (index === state.your_answer) style += " incorrect";
+    }
     if (state.phase === "question" && state.your_answer === index) style += " selected";
     const option = button(String.fromCharCode(65 + index) + ".  " + text, style, async () => {
       try {
@@ -373,6 +376,11 @@ function leaveGame() {
   history.replaceState(null, "", "/");
   renderHome();
 }
+
+document.querySelector(".brand").addEventListener("click", event => {
+  event.preventDefault();
+  leaveGame();
+});
 
 function restoreSession() {
   activeRoom = sessionStorage.getItem(storageKeys.room) || "";
