@@ -261,17 +261,86 @@ function renderQuestion(state) {
   meta.append(element("span", "answer-count", answeredCount + " / " + state.player_count + " answered"));
   if (question.category) meta.insertBefore(element("span", "category-tag", question.category), meta.lastChild);
   section.append(meta);
+  if (question.modifier) {
+    const modifier = element("div", "modifier-card");
+    modifier.append(element("p", "eyebrow", "Modyfikator rundy · " + question.modifier.name));
+    modifier.append(element("p", "modifier-instruction", question.modifier.instruction));
+    if (question.modifier.time_limit && state.phase === "question") {
+      const seconds = question.time_remaining;
+      modifier.append(element("span", "modifier-timer", seconds + " seconds left"));
+    }
+    section.append(modifier);
+  }
   section.append(element("h2", "question-text", question.text));
 
+  if (role === "player" && state.phase === "question" && state.powerups) {
+    const panel = element("div", "powerup-panel");
+    panel.append(element("h3", "", "Your power-ups"));
+    const grid = element("div", "powerup-grid");
+    const usedPowerups = state.used_powerups || [];
+    const hasAnswered = state.your_answer !== undefined;
+    state.powerups.forEach(powerup => {
+      const used = usedPowerups.includes(powerup.key);
+      let disabled = used || state.phase !== "question";
+      if (powerup.key === "fifty_fifty") {
+        disabled = disabled || hasAnswered || question.answers.length < 3;
+      } else if (powerup.key === "scout") {
+        disabled = disabled || hasAnswered || !state.scout_available;
+      } else if (powerup.key === "call_friend") {
+        disabled = disabled || hasAnswered;
+      }
+
+      const item = element("div", "powerup-item");
+      const active = powerup.key === "second_chance" && state.can_change_answer;
+      const buttonLabel = active
+        ? powerup.name + " · ACTIVE"
+        : powerup.name + (used ? " · USED" : "");
+      const useButton = button(
+        buttonLabel,
+        "outline powerup-button",
+        () => activatePowerup(powerup.key)
+      );
+      useButton.disabled = disabled;
+      if (powerup.key === "fifty_fifty" && question.answers.length < 3) {
+        useButton.title = "50:50 requires at least three answer choices.";
+      } else if (powerup.key === "scout" && !state.scout_available) {
+        useButton.title = "Scout is available after another player has answered.";
+      }
+      item.append(useButton, element("p", "powerup-description", powerup.description));
+      grid.append(item);
+    });
+    panel.append(grid);
+    if (state.scouted_votes) {
+      const votes = state.scouted_votes
+        .map((count, index) => String.fromCharCode(65 + index) + ": " + count)
+        .join(" · ");
+      panel.append(element("p", "scout-result", "Other players' votes: " + votes));
+    }
+    section.append(panel);
+  }
+  if (state.second_chance_seconds !== undefined && state.phase === "question") {
+    section.append(element(
+      "p",
+      "second-chance-note",
+      "Everyone has answered. Second Chance closes in " + state.second_chance_seconds + " seconds."
+    ));
+  }
+
   const answers = element("div", "answer-grid");
+  const eliminatedAnswers = state.eliminated_answers || [];
   question.answers.forEach((text, index) => {
     let style = "answer-option";
+    const eliminated = eliminatedAnswers.includes(index);
+    if (eliminated) style += " eliminated";
     if (state.phase === "revealed") {
       if (index === state.correct_answer_index) style += " correct";
       else if (index === state.your_answer) style += " incorrect";
     }
     if (state.phase === "question" && state.your_answer === index) style += " selected";
-    const option = button(String.fromCharCode(65 + index) + ".  " + text, style, async () => {
+    let label = String.fromCharCode(65 + index) + ".  " + text;
+    if (eliminated) label += " (eliminated)";
+    if (state.scouted_votes) label += " · " + state.scouted_votes[index] + " votes";
+    const option = button(label, style, async () => {
       try {
         await request("/api/answer", {
           room_code: activeRoom,
@@ -283,7 +352,10 @@ function renderQuestion(state) {
         showError(error.message);
       }
     });
-    option.disabled = role === "host" || state.phase !== "question" || state.your_answer !== undefined;
+    option.disabled = role === "host"
+      || state.phase !== "question"
+      || (state.your_answer !== undefined && !state.can_change_answer)
+      || eliminated;
     answers.append(option);
   });
   section.append(answers);
@@ -297,7 +369,15 @@ function renderQuestion(state) {
       section.append(element("p", "muted center", message));
     }
   } else if (role === "player") {
-    section.append(element("p", "muted center", state.your_answer !== undefined ? "Answer locked in. Waiting for the reveal…" : "Choose your answer. You can only answer once."));
+    let message = "Choose your answer. You can only answer once.";
+    if (state.can_change_answer) {
+      message = state.your_answer !== undefined
+        ? "Second Chance active. Choose a replacement answer once."
+        : "Second Chance active. You may change your answer once before the reveal.";
+    } else if (state.your_answer !== undefined) {
+      message = "Answer locked in. Waiting for the reveal…";
+    }
+    section.append(element("p", "muted center", message));
   }
 
   if (role === "host" && state.mode === "manual") {
@@ -335,6 +415,19 @@ async function hostAction(action) {
       room_code: activeRoom,
       host_token: hostToken,
       action
+    });
+    await refreshState();
+  } catch (error) {
+    showError(error.message);
+  }
+}
+
+async function activatePowerup(powerup) {
+  try {
+    await request("/api/powerup", {
+      room_code: activeRoom,
+      player_id: playerId,
+      powerup
     });
     await refreshState();
   } catch (error) {

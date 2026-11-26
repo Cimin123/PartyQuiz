@@ -83,9 +83,21 @@ h2 { margin-bottom: 12px; font-size: 23px; line-height: 1.15; letter-spacing: -.
 .question-meta .eyebrow { margin: 0; }
 .category-tag { margin-right: auto; border-radius: 100px; background: #edf0e3; padding: 5px 9px; color: #626950; font-size: 10px; }
 .answer-count { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.modifier-card { margin: -4px 0 22px; border: 1px solid #d5dfa7; border-radius: 10px; background: #f3f7df; padding: 13px 15px; }
+.modifier-card .eyebrow { margin-bottom: 5px; }
+.modifier-instruction { margin: 0; color: #454b35; font-size: 14px; line-height: 1.45; }
+.modifier-timer { display: inline-block; margin-top: 9px; color: var(--green-dark); font-family: Consolas, "Courier New", monospace; font-size: 12px; font-weight: 700; }
+.powerup-panel { margin: 0 0 24px; border: 1px solid var(--line); border-radius: 10px; background: #faf9f2; padding: 16px; }
+.powerup-panel h3 { margin: 0 0 11px; font-size: 15px; }
+.powerup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.powerup-item { border: 1px solid var(--line); border-radius: 8px; background: var(--white); padding: 10px; }
+.powerup-button { width: 100%; min-height: 38px; padding: 0 10px; font-size: 12px; }
+.powerup-description { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.scout-result, .second-chance-note { margin: 12px 0 0; color: var(--green-dark); font-size: 12px; font-weight: 600; }
 .question-text { max-width: 650px; margin-bottom: 25px; }
 .answer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .answer-option { min-height: 62px; border: 1px solid var(--line); border-radius: 9px; background: var(--white); padding: 12px 15px; color: var(--ink); text-align: left; line-height: 1.4; }
+.answer-option.eliminated { opacity: .48; text-decoration: line-through; }
 .answer-option:hover:not(:disabled) { border-color: var(--green); background: #f3f7ea; }
 .answer-option.selected { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); background: #eef6e9; }
 .answer-option.correct { border-color: #9ac294; background: #e8f4e4; color: var(--green-dark); font-weight: 700; }
@@ -106,6 +118,7 @@ footer { border-top: 1px solid var(--line); padding: 18px 0 24px; color: var(--m
   .screen { padding-top: 33px; }
   .home-grid { grid-template-columns: 1fr; }
   .card { padding: 21px; }
+  .powerup-grid { grid-template-columns: 1fr; }
   .answer-grid { grid-template-columns: 1fr; }
   .game-header { align-items: center; }
   .room-pill { padding: 8px 10px; font-size: 9px; }

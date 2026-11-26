@@ -1,13 +1,18 @@
 import csv
 import io
 import json
+import math
+import random
 import secrets
 import socket
 import sys
 import threading
+import time
 import unicodedata
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import parse_qs, urlparse
 
 
@@ -24,6 +29,110 @@ class RequestError(Exception):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+@dataclass(frozen=True)
+class QuestionModifier:
+    key: str
+    name: str
+    instruction: str
+    time_limit: int | None = None
+    correct_points: int = 1
+    wrong_penalty: int = 0
+
+    EVERY_QUESTIONS: ClassVar[int] = 5
+    ALL: ClassVar[tuple["QuestionModifier", ...]]
+
+    @classmethod
+    def for_question(cls, question_number):
+        if question_number % cls.EVERY_QUESTIONS:
+            return None
+        return random.choice(cls.ALL)
+
+    def public_data(self):
+        return {
+            "key": self.key,
+            "name": self.name,
+            "instruction": self.instruction,
+            "time_limit": self.time_limit,
+        }
+
+
+QuestionModifier.ALL = (
+    QuestionModifier(
+        "team_toast",
+        "Przybij piątkę!",
+        "Przed odpowiedzią przybij piątkę z solenizantem.",
+    ),
+    QuestionModifier(
+        "no_talking",
+        "Bez gadania",
+        "Nie wolno rozmawiać podczas odpowiadania na pytanie.",
+    ),
+    QuestionModifier(
+        "captain",
+        "Kapitan decyduje",
+        "Tylko osoba trzymająca telefon albo siedząca najbliżej niego może odpowiadać w tej rundzie.",
+    ),
+    QuestionModifier(
+        "opposing_team_compliment",
+        "Komplement dla rywali",
+        "Przed odpowiedzią skomplementujcie osobę z przeciwnej drużyny.",
+    ),
+    QuestionModifier(
+        "consult_paulina",
+        "Konsultacje z Pauliną",
+        "Skonsultujcie odpowiedź z Pauliną, zanim ją wybierzecie.",
+    ),
+    QuestionModifier(
+        "team_treat",
+        "Poczęstunek dla zwycięzców",
+        "Za zgodą wszystkich: drużyny z błędną odpowiedzią stawiają tym z poprawną szocika",
+    ),
+    QuestionModifier(
+        "speed_round",
+        "Szybko!",
+        "Macie tylko 15 sekund na odpowiedź!",
+        time_limit=15,
+    ),
+    QuestionModifier(
+        "double_points",
+        "Podwójne punkty",
+        "Poprawna odpowiedź daje 3 punkty.",
+        correct_points=3,
+    ),
+    QuestionModifier(
+        "wrong_answer_penalty",
+        "Kara jak w kangurku",
+        "Błędna odpowiedź odejmuje dwa punkty.",
+        wrong_penalty=2,
+    ),
+)
+
+SECOND_CHANCE_WINDOW_SECONDS = 5
+PLAYER_POWERUPS = (
+    {
+        "key": "fifty_fifty",
+        "name": "50:50",
+        "description": "Hide half of the answer choices (all incorrect) for yourself.",
+    },
+    {
+        "key": "scout",
+        "name": "Scout",
+        "description": "See an anonymous count of other players' answers to this question.",
+    },
+    {
+        "key": "call_friend",
+        "name": "Call a friend",
+        "description": "Ask someone outside the game for help before answering.",
+    },
+    {
+        "key": "second_chance",
+        "name": "Second chance",
+        "description": "Unlock one answer change before the reveal. In auto mode, activate before your answer if you may be last.",
+    },
+)
+PLAYER_POWERUP_KEYS = {powerup["key"] for powerup in PLAYER_POWERUPS}
 
 
 def validate_quiz(data):
@@ -267,6 +376,7 @@ class QuizRoom:
         self.phase = "lobby"
         self.question_index = -1
         self.answers = {}
+        self.second_chance_deadline = None
         self.lock = threading.RLock()
 
     def public_state(self, player_id=None):
@@ -284,6 +394,17 @@ class QuizRoom:
                 }
                 if current.get("category"):
                     question["category"] = current["category"]
+                if self.modifier is not None:
+                    question["modifier"] = self.modifier.public_data()
+                    if (
+                        self.modifier.time_limit is not None
+                        and self.phase == "question"
+                    ):
+                        elapsed = time.monotonic() - self.question_started_at
+                        question["time_remaining"] = max(
+                            0,
+                            math.ceil(self.modifier.time_limit - elapsed),
+                        )
                 if self.phase == "revealed":
                     correct_answer_index = next(
                         index
@@ -311,6 +432,30 @@ class QuizRoom:
                 "players": players,
                 "player_count": len(self.players),
             }
+            if self.second_chance_deadline is not None:
+                response["second_chance_seconds"] = max(
+                    0,
+                    math.ceil(self.second_chance_deadline - time.monotonic()),
+                )
+            if player_id in self.players:
+                player = self.players[player_id]
+                response.update(
+                    {
+                        "powerups": [dict(powerup) for powerup in PLAYER_POWERUPS],
+                        "used_powerups": sorted(player["used_powerups"]),
+                        "eliminated_answers": list(player["eliminated_answers"]),
+                        "scouted_votes": (
+                            list(player["scouted_votes"])
+                            if player["scouted_votes"] is not None
+                            else None
+                        ),
+                        "scout_available": any(
+                            other_player_id != player_id
+                            for other_player_id in self.answers
+                        ),
+                        "can_change_answer": player["can_change_answer"],
+                    }
+                )
             if player_id in self.players and player_id in self.answers:
                 response["your_answer"] = self.answers[player_id]
             return response
@@ -322,7 +467,14 @@ class QuizRoom:
             if len(self.players) >= 100:
                 raise RequestError("This room is full.", 409)
             player_id = secrets.token_urlsafe(18)
-            self.players[player_id] = {"name": name, "score": 0}
+            self.players[player_id] = {
+                "name": name,
+                "score": 0,
+                "used_powerups": set(),
+                "eliminated_answers": [],
+                "scouted_votes": None,
+                "can_change_answer": False,
+            }
             return player_id
 
     def submit_answer(self, player_id, answer_index):
@@ -331,20 +483,129 @@ class QuizRoom:
                 raise RequestError("Player not found in this room.", 403)
             if self.phase != "question":
                 raise RequestError("Answers are not being accepted right now.", 409)
-            if player_id in self.answers:
+            player = self.players[player_id]
+            already_answered = player_id in self.answers
+            if already_answered and not player["can_change_answer"]:
                 raise RequestError("You have already answered this question.", 409)
+            if (
+                self.modifier is not None
+                and self.modifier.time_limit is not None
+                and time.monotonic() - self.question_started_at
+                >= self.modifier.time_limit
+                and not (
+                    already_answered
+                    and self.mode == "auto"
+                    and self.second_chance_deadline is not None
+                )
+            ):
+                self._reveal_locked()
+                raise RequestError("Time is up for this question.", 409)
+            if (
+                self.second_chance_deadline is not None
+                and time.monotonic() >= self.second_chance_deadline
+            ):
+                self.second_chance_deadline = None
+                self._reveal_locked()
+                raise RequestError("The second-chance window has closed.", 409)
             answers = self.quiz["questions"][self.question_index]["answers"]
             if not isinstance(answer_index, int) or isinstance(answer_index, bool):
                 raise RequestError("Answer selection must be a number.")
             if not 0 <= answer_index < len(answers):
                 raise RequestError("That answer does not exist.")
+            if answer_index in player["eliminated_answers"]:
+                raise RequestError("That answer was eliminated by your 50:50 power-up.", 409)
             self.answers[player_id] = answer_index
+            if already_answered:
+                player["can_change_answer"] = False
             if (
-                self.mode == "auto"
+                not already_answered
+                and self.mode == "auto"
                 and self.players
                 and len(self.answers) == len(self.players)
             ):
+                self._begin_auto_reveal_locked()
+
+    def activate_powerup(self, player_id, powerup_key):
+        with self.lock:
+            if player_id not in self.players:
+                raise RequestError("Player not found in this room.", 403)
+            if self.phase != "question":
+                raise RequestError("Power-ups are only available during a question.", 409)
+            if not isinstance(powerup_key, str) or powerup_key not in PLAYER_POWERUP_KEYS:
+                raise RequestError("That power-up does not exist.")
+
+            if (
+                self.second_chance_deadline is not None
+                and time.monotonic() >= self.second_chance_deadline
+            ):
+                self.second_chance_deadline = None
                 self._reveal_locked()
+                raise RequestError("The second-chance window has closed.", 409)
+
+            player = self.players[player_id]
+            if powerup_key in player["used_powerups"]:
+                raise RequestError("You have already used this power-up.", 409)
+            already_answered = player_id in self.answers
+            is_second_chance = powerup_key == "second_chance"
+            if not is_second_chance and already_answered:
+                raise RequestError(
+                    "Use this power-up before submitting your answer.", 409
+                )
+
+            if (
+                self.modifier is not None
+                and self.modifier.time_limit is not None
+                and time.monotonic() - self.question_started_at
+                >= self.modifier.time_limit
+                and not (
+                    is_second_chance
+                    and self.mode == "auto"
+                    and self.second_chance_deadline is not None
+                )
+            ):
+                self._reveal_locked()
+                raise RequestError("Time is up for this question.", 409)
+
+            if powerup_key == "fifty_fifty":
+                answer_count = len(
+                    self.quiz["questions"][self.question_index]["answers"]
+                )
+                if answer_count < 3:
+                    raise RequestError(
+                        "50:50 requires at least three answer choices.", 409
+                    )
+                answers = self.quiz["questions"][self.question_index]["answers"]
+                correct_index = next(
+                    index for index, answer in enumerate(answers) if answer["correct"]
+                )
+                wrong_indices = [
+                    index for index in range(answer_count) if index != correct_index
+                ]
+                player["eliminated_answers"] = random.sample(
+                    wrong_indices,
+                    answer_count // 2,
+                )
+            elif powerup_key == "scout":
+                other_answers = [
+                    answer_index
+                    for other_player_id, answer_index in self.answers.items()
+                    if other_player_id != player_id
+                ]
+                if not other_answers:
+                    raise RequestError(
+                        "Scout is available after another player has answered.", 409
+                    )
+                answer_count = len(
+                    self.quiz["questions"][self.question_index]["answers"]
+                )
+                votes = [0] * answer_count
+                for answer_index in other_answers:
+                    votes[answer_index] += 1
+                player["scouted_votes"] = votes
+            elif is_second_chance:
+                player["can_change_answer"] = True
+
+            player["used_powerups"].add(powerup_key)
 
     def host_action(self, host_token, action):
         with self.lock:
@@ -357,9 +618,9 @@ class QuizRoom:
                         "At least one player must join before starting auto mode.",
                         409,
                     )
-                self.phase = "question"
                 self.question_index = 0
                 self.answers = {}
+                self._start_question_locked()
                 return
 
             if action == "reveal" and self.phase == "question":
@@ -380,8 +641,15 @@ class QuizRoom:
         current_answers = self.quiz["questions"][self.question_index]["answers"]
         for player_id, answer_index in self.answers.items():
             if current_answers[answer_index]["correct"]:
-                self.players[player_id]["score"] += 1
+                points = self.modifier.correct_points if self.modifier else 1
+                self.players[player_id]["score"] += points
+            elif self.modifier is not None:
+                self.players[player_id]["score"] -= self.modifier.wrong_penalty
         self.phase = "revealed"
+        self.question_started_at = None
+        self.second_chance_deadline = None
+        for player in self.players.values():
+            player["can_change_answer"] = False
         if self.mode == "auto":
             timer = threading.Timer(
                 AUTO_ADVANCE_SECONDS,
@@ -390,6 +658,74 @@ class QuizRoom:
             )
             timer.daemon = True
             timer.start()
+
+    def _start_question_locked(self):
+        self.phase = "question"
+        self.second_chance_deadline = None
+        for player in self.players.values():
+            player["eliminated_answers"] = []
+            player["scouted_votes"] = None
+            player["can_change_answer"] = False
+        self.modifier = QuestionModifier.for_question(self.question_index + 1)
+        self.question_started_at = time.monotonic()
+        if self.modifier is not None and self.modifier.time_limit is not None:
+            timer = threading.Timer(
+                self.modifier.time_limit,
+                self._question_timeout,
+                args=(self.question_index,),
+            )
+            timer.daemon = True
+            timer.start()
+
+    def _question_timeout(self, question_index):
+        with self.lock:
+            if (
+                self.phase == "question"
+                and self.question_index == question_index
+                and self.second_chance_deadline is None
+                and self.modifier is not None
+                and self.modifier.time_limit is not None
+            ):
+                self._reveal_locked()
+
+    def _begin_auto_reveal_locked(self):
+        if any(
+            player["can_change_answer"]
+            for player in self.players.values()
+        ):
+            self.second_chance_deadline = (
+                time.monotonic() + SECOND_CHANCE_WINDOW_SECONDS
+            )
+            timer = threading.Timer(
+                SECOND_CHANCE_WINDOW_SECONDS,
+                self._auto_reveal_after_second_chance,
+                args=(self.question_index,),
+            )
+            timer.daemon = True
+            timer.start()
+            return
+        self._reveal_locked()
+
+    def _auto_reveal_after_second_chance(self, question_index):
+        with self.lock:
+            if (
+                self.phase != "question"
+                or self.question_index != question_index
+                or self.second_chance_deadline is None
+            ):
+                return
+            remaining = self.second_chance_deadline - time.monotonic()
+            if remaining > 0:
+                timer = threading.Timer(
+                    remaining,
+                    self._auto_reveal_after_second_chance,
+                    args=(question_index,),
+                )
+                timer.daemon = True
+                timer.start()
+                return
+            self.second_chance_deadline = None
+            self._reveal_locked()
 
     def _auto_advance(self, question_index):
         with self.lock:
@@ -406,7 +742,7 @@ class QuizRoom:
             return
         self.question_index += 1
         self.answers = {}
-        self.phase = "question"
+        self._start_question_locked()
 
 
 def create_room(quiz_data=None, mode="manual", csv_content=None, quiz_title=None):
@@ -505,6 +841,11 @@ class QuizRequestHandler(BaseHTTPRequestHandler):
                 code = self.required_string(data, "room_code", 5)
                 player_id = self.required_string(data, "player_id", 100)
                 get_room(code).submit_answer(player_id, data.get("answer_index"))
+                self.send_json(200, {"ok": True})
+            elif self.path == "/api/powerup":
+                code = self.required_string(data, "room_code", 5)
+                player_id = self.required_string(data, "player_id", 100)
+                get_room(code).activate_powerup(player_id, data.get("powerup"))
                 self.send_json(200, {"ok": True})
             elif self.path == "/api/host/action":
                 code = self.required_string(data, "room_code", 5)
