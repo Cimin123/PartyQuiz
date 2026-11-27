@@ -87,13 +87,13 @@ h2 { margin-bottom: 12px; font-size: 23px; line-height: 1.15; letter-spacing: -.
 .modifier-card .eyebrow { margin-bottom: 5px; }
 .modifier-instruction { margin: 0; color: #454b35; font-size: 14px; line-height: 1.45; }
 .modifier-timer { display: inline-block; margin-top: 9px; color: var(--green-dark); font-family: Consolas, "Courier New", monospace; font-size: 12px; font-weight: 700; }
-.powerup-panel { margin: 0 0 24px; border: 1px solid var(--line); border-radius: 10px; background: #faf9f2; padding: 16px; }
-.powerup-panel h3 { margin: 0 0 11px; font-size: 15px; }
-.powerup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-.powerup-item { border: 1px solid var(--line); border-radius: 8px; background: var(--white); padding: 10px; }
-.powerup-button { width: 100%; min-height: 38px; padding: 0 10px; font-size: 12px; }
-.powerup-description { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
-.scout-result, .second-chance-note { margin: 12px 0 0; color: var(--green-dark); font-size: 12px; font-weight: 600; }
+.powerup-panel { max-width: 760px; margin: 0 auto 18px; border-color: #d7e1da; background: #f0f5f1; padding: 14px 18px; }
+.powerup-panel h3 { margin: 0 0 9px; font-size: 14px; }
+.powerup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.powerup-item { border: 1px solid #e0e7e1; border-radius: 8px; background: rgba(255, 254, 250, .85); padding: 8px; }
+.powerup-button { width: 100%; min-height: 34px; padding: 0 8px; font-size: 11px; }
+.powerup-description { margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.scout-result, .second-chance-note { margin: 10px 0 0; color: var(--green-dark); font-size: 11px; font-weight: 600; }
 .question-text { max-width: 650px; margin-bottom: 25px; }
 .answer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .answer-option { min-height: 62px; border: 1px solid var(--line); border-radius: 9px; background: var(--white); padding: 12px 15px; color: var(--ink); text-align: left; line-height: 1.4; }
@@ -118,6 +118,7 @@ footer { border-top: 1px solid var(--line); padding: 18px 0 24px; color: var(--m
   .screen { padding-top: 33px; }
   .home-grid { grid-template-columns: 1fr; }
   .card { padding: 21px; }
+  .powerup-panel { padding: 12px; }
   .powerup-grid { grid-template-columns: 1fr; }
   .answer-grid { grid-template-columns: 1fr; }
   .game-header { align-items: center; }

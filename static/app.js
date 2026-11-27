@@ -255,6 +255,7 @@ function renderGame(state) {
 function renderQuestion(state) {
   const question = state.question;
   const section = element("section", "card game-card");
+  let powerupPanel = null;
   const meta = element("div", "question-meta");
   meta.append(element("p", "eyebrow", "QUESTION " + question.number + " / " + question.total));
   const answeredCount = state.players.filter(player => player.has_answered).length;
@@ -274,8 +275,8 @@ function renderQuestion(state) {
   section.append(element("h2", "question-text", question.text));
 
   if (role === "player" && state.phase === "question" && state.powerups) {
-    const panel = element("div", "powerup-panel");
-    panel.append(element("h3", "", "Your power-ups"));
+    powerupPanel = element("section", "card powerup-panel");
+    powerupPanel.append(element("h3", "", "Your power-ups"));
     const grid = element("div", "powerup-grid");
     const usedPowerups = state.used_powerups || [];
     const hasAnswered = state.your_answer !== undefined;
@@ -286,12 +287,13 @@ function renderQuestion(state) {
         disabled = disabled || hasAnswered || question.answers.length < 3;
       } else if (powerup.key === "scout") {
         disabled = disabled || hasAnswered || !state.scout_available;
-      } else if (powerup.key === "call_friend") {
+      } else if (powerup.key === "call_friend" || powerup.key === "hide_answers") {
         disabled = disabled || hasAnswered;
       }
 
       const item = element("div", "powerup-item");
-      const active = powerup.key === "second_chance" && state.can_change_answer;
+      const active = (powerup.key === "second_chance" && state.can_change_answer)
+        || (powerup.key === "hide_answers" && state.hide_answers);
       const buttonLabel = active
         ? powerup.name + " · ACTIVE"
         : powerup.name + (used ? " · USED" : "");
@@ -309,21 +311,13 @@ function renderQuestion(state) {
       item.append(useButton, element("p", "powerup-description", powerup.description));
       grid.append(item);
     });
-    panel.append(grid);
+    powerupPanel.append(grid);
     if (state.scouted_votes) {
       const votes = state.scouted_votes
         .map((count, index) => String.fromCharCode(65 + index) + ": " + count)
         .join(" · ");
-      panel.append(element("p", "scout-result", "Other players' votes: " + votes));
+      powerupPanel.append(element("p", "scout-result", "Other players' votes: " + votes));
     }
-    section.append(panel);
-  }
-  if (state.second_chance_seconds !== undefined && state.phase === "question") {
-    section.append(element(
-      "p",
-      "second-chance-note",
-      "Everyone has answered. Second Chance closes in " + state.second_chance_seconds + " seconds."
-    ));
   }
 
   const answers = element("div", "answer-grid");
@@ -337,7 +331,9 @@ function renderQuestion(state) {
       else if (index === state.your_answer) style += " incorrect";
     }
     if (state.phase === "question" && state.your_answer === index) style += " selected";
-    let label = String.fromCharCode(65 + index) + ".  " + text;
+    let label = state.hide_answers
+      ? String.fromCharCode(65 + index)
+      : String.fromCharCode(65 + index) + ".  " + text;
     if (eliminated) label += " (eliminated)";
     if (state.scouted_votes) label += " · " + state.scouted_votes[index] + " votes";
     const option = button(label, style, async () => {
@@ -359,6 +355,16 @@ function renderQuestion(state) {
     answers.append(option);
   });
   section.append(answers);
+
+  if (state.second_chance_seconds !== undefined && state.phase === "question") {
+    const note = element(
+      "p",
+      "second-chance-note",
+      "Everyone has answered. Second Chance closes in " + state.second_chance_seconds + " seconds."
+    );
+    if (powerupPanel) powerupPanel.append(note);
+    else section.append(note);
+  }
 
   if (state.phase === "revealed") {
     section.append(element("p", "reveal-note", "Correct answer: " + state.correct_answer));
@@ -391,6 +397,7 @@ function renderQuestion(state) {
     section.append(controls);
   }
   screen.append(section);
+  if (powerupPanel) screen.append(powerupPanel);
 }
 
 function addScoreboard(container, players) {

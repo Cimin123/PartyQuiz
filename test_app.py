@@ -189,6 +189,47 @@ class QuizRoomTests(unittest.TestCase):
         self.room.host_action("host-secret", "reveal")
         self.assertEqual(self.room.players[self.player_id]["score"], 1)
 
+    def test_memory_test_hides_answers_only_for_the_player_until_reveal(self):
+        room = QuizRoom("MEMRY", validate_quiz(VALID_QUIZ), "host-secret")
+        first_player = room.add_player("First")
+        second_player = room.add_player("Second")
+        room.host_action("host-secret", "start")
+
+        room.activate_powerup(first_player, "hide_answers")
+
+        hidden_state = room.public_state(first_player)
+        self.assertTrue(hidden_state["hide_answers"])
+        self.assertEqual(hidden_state["question"]["answers"], [None, None])
+        self.assertEqual(
+            room.public_state(second_player)["question"]["answers"],
+            ["Wrong", "Right"],
+        )
+        self.assertEqual(
+            room.public_state()["question"]["answers"],
+            ["Wrong", "Right"],
+        )
+        with self.assertRaisesRegex(RequestError, "already used"):
+            room.activate_powerup(first_player, "hide_answers")
+
+        room.submit_answer(first_player, 1)
+        room.host_action("host-secret", "reveal")
+        revealed_state = room.public_state(first_player)
+        self.assertFalse(revealed_state["hide_answers"])
+        self.assertEqual(revealed_state["question"]["answers"], ["Wrong", "Right"])
+        self.assertEqual(revealed_state["correct_answer"], "Right")
+
+    def test_memory_test_must_be_activated_before_answering(self):
+        self.room.host_action("host-secret", "start")
+        self.room.submit_answer(self.player_id, 0)
+
+        with self.assertRaisesRegex(RequestError, "before submitting"):
+            self.room.activate_powerup(self.player_id, "hide_answers")
+
+        self.assertNotIn(
+            "hide_answers",
+            self.room.public_state(self.player_id)["used_powerups"],
+        )
+
     def test_modifier_is_selected_only_for_every_fifth_question(self):
         modifier = QuestionModifier.ALL[0]
         with patch("app.random.choice", return_value=modifier) as choose:
@@ -567,7 +608,7 @@ class QuizApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(state["used_powerups"], ["call_friend"])
-        self.assertEqual(len(state["powerups"]), 4)
+        self.assertEqual(len(state["powerups"]), 5)
 
         status, result = self.request("/api/powerup", payload)
         self.assertEqual(status, 409)

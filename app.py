@@ -131,6 +131,11 @@ PLAYER_POWERUPS = (
         "name": "Second chance",
         "description": "Unlock one answer change before the reveal. In auto mode, activate before your answer if you may be last.",
     },
+    {
+        "key": "hide_answers",
+        "name": "Memory test",
+        "description": "Hide the answer text for yourself; only the A, B, C, D, E labels stay visible.",
+    },
 )
 PLAYER_POWERUP_KEYS = {powerup["key"] for powerup in PLAYER_POWERUPS}
 
@@ -384,13 +389,22 @@ class QuizRoom:
             question = None
             correct_answer = None
             correct_answer_index = None
+            hide_answers = (
+                player_id in self.players
+                and self.phase == "question"
+                and self.players[player_id]["hide_answers"]
+            )
             if self.phase in ("question", "revealed"):
                 current = self.quiz["questions"][self.question_index]
                 question = {
                     "number": self.question_index + 1,
                     "total": len(self.quiz["questions"]),
                     "text": current["question"],
-                    "answers": [answer["text"] for answer in current["answers"]],
+                    "answers": (
+                        [None] * len(current["answers"])
+                        if hide_answers
+                        else [answer["text"] for answer in current["answers"]]
+                    ),
                 }
                 if current.get("category"):
                     question["category"] = current["category"]
@@ -454,6 +468,7 @@ class QuizRoom:
                             for other_player_id in self.answers
                         ),
                         "can_change_answer": player["can_change_answer"],
+                        "hide_answers": hide_answers,
                     }
                 )
             if player_id in self.players and player_id in self.answers:
@@ -474,6 +489,7 @@ class QuizRoom:
                 "eliminated_answers": [],
                 "scouted_votes": None,
                 "can_change_answer": False,
+                "hide_answers": False,
             }
             return player_id
 
@@ -602,6 +618,8 @@ class QuizRoom:
                 for answer_index in other_answers:
                     votes[answer_index] += 1
                 player["scouted_votes"] = votes
+            elif powerup_key == "hide_answers":
+                player["hide_answers"] = True
             elif is_second_chance:
                 player["can_change_answer"] = True
 
@@ -666,6 +684,7 @@ class QuizRoom:
             player["eliminated_answers"] = []
             player["scouted_votes"] = None
             player["can_change_answer"] = False
+            player["hide_answers"] = False
         self.modifier = QuestionModifier.for_question(self.question_index + 1)
         self.question_started_at = time.monotonic()
         if self.modifier is not None and self.modifier.time_limit is not None:
