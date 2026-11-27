@@ -98,6 +98,18 @@ function renderHome() {
   modeLabel.append(modeSelect);
   modeLabel.append(element("span", "field-hint", "Automatic mode shows the answer, then moves on after 3 seconds."));
   hostForm.append(modeLabel);
+  const randomizeLabel = element("label", "checkbox-field");
+  const randomizeQuestions = document.createElement("input");
+  randomizeQuestions.type = "checkbox";
+  randomizeQuestions.name = "randomize_questions";
+  randomizeLabel.append(
+    randomizeQuestions,
+    element("span", "", "Randomize question order")
+  );
+  hostForm.append(randomizeLabel);
+  hostForm.append(
+    element("span", "field-hint", "Everyone gets the same shuffled question order.")
+  );
   const hostSubmit = element("button", "primary", "Create game");
   hostSubmit.type = "submit";
   hostForm.append(hostSubmit);
@@ -113,11 +125,16 @@ function renderHome() {
         result = await request("/api/rooms", {
           quiz_csv: await selectedFile.text(),
           quiz_title: title || "Imported Quiz",
-          mode: modeSelect.value
+          mode: modeSelect.value,
+          randomize_questions: randomizeQuestions.checked
         });
       } else {
         const quiz = JSON.parse(await selectedFile.text());
-        result = await request("/api/rooms", { quiz, mode: modeSelect.value });
+        result = await request("/api/rooms", {
+          quiz,
+          mode: modeSelect.value,
+          randomize_questions: randomizeQuestions.checked
+        });
       }
       activeRoom = result.room_code;
       hostToken = result.host_token;

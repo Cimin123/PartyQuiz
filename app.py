@@ -180,7 +180,7 @@ def validate_quiz(data):
                     question_number
                 )
             )
-        if not isinstance(answers, list) or not 2 <= len(answers) <= 6:
+        if not isinstance(answers, list) or len(answers) > 6:
             raise RequestError(
                 "Question {} must have between 2 and 6 answers.".format(question_number)
             )
@@ -194,21 +194,39 @@ def validate_quiz(data):
                 )
             text = answer.get("text")
             correct = answer.get("correct", False)
-            if not isinstance(text, str) or not text.strip() or len(text.strip()) > 200:
-                raise RequestError(
-                    "Every answer in question {} must have text between 1 and 200 characters.".format(
-                        question_number
-                    )
-                )
             if not isinstance(correct, bool):
                 raise RequestError(
                     "The correct field in question {} must be true or false.".format(
                         question_number
                     )
                 )
+            if not isinstance(text, str):
+                raise RequestError(
+                    "Every answer in question {} must have text between 1 and 200 characters.".format(
+                        question_number
+                    )
+                )
+            if not text.strip():
+                if correct:
+                    raise RequestError(
+                        "The correct answer in question {} cannot be blank.".format(
+                            question_number
+                        )
+                    )
+                continue
+            if len(text.strip()) > 200:
+                raise RequestError(
+                    "Every answer in question {} must have text between 1 and 200 characters.".format(
+                        question_number
+                    )
+                )
             correct_count += int(correct)
             validated_answers.append({"text": text.strip(), "correct": correct})
 
+        if not 2 <= len(validated_answers) <= 6:
+            raise RequestError(
+                "Question {} must have between 2 and 6 answers.".format(question_number)
+            )
         if correct_count != 1:
             raise RequestError(
                 "Question {} must have exactly one answer marked correct.".format(
@@ -328,9 +346,11 @@ def parse_csv_quiz(content, title):
             )
             continue
 
-        answer_texts = [
-            (row.get(header) or "").strip() or "x" for header in answer_headers
-        ]
+        answer_texts = []
+        for header in answer_headers:
+            answer = (row.get(header) or "").strip()
+            if answer:
+                answer_texts.append(answer)
         matches = [
             index
             for index, answer in enumerate(answer_texts)
@@ -1193,9 +1213,17 @@ def restore_saved_rooms():
     print("Restored {} saved quiz room(s).".format(len(restored)))
 
 
-def create_room(quiz_data=None, mode="manual", csv_content=None, quiz_title=None):
+def create_room(
+    quiz_data=None,
+    mode="manual",
+    csv_content=None,
+    quiz_title=None,
+    randomize_questions=False,
+):
     if mode not in ("manual", "auto"):
         raise RequestError("Game mode must be 'manual' or 'auto'.")
+    if not isinstance(randomize_questions, bool):
+        raise RequestError("randomize_questions must be a boolean.")
     if csv_content is None:
         quiz = validate_quiz(quiz_data)
         import_warnings = []
@@ -1203,6 +1231,8 @@ def create_room(quiz_data=None, mode="manual", csv_content=None, quiz_title=None
         quiz, import_warnings = parse_csv_quiz(csv_content, quiz_title)
     for question in quiz["questions"]:
         random.shuffle(question["answers"])
+    if randomize_questions:
+        random.shuffle(quiz["questions"])
     with ROOMS_LOCK:
         for _ in range(10):
             code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(5))
@@ -1282,10 +1312,13 @@ class QuizRequestHandler(BaseHTTPRequestHandler):
                         mode=data.get("mode", "manual"),
                         csv_content=data.get("quiz_csv"),
                         quiz_title=data.get("quiz_title"),
+                        randomize_questions=data.get("randomize_questions", False),
                     )
                 else:
                     code, host_token, import_warnings = create_room(
-                        data.get("quiz"), data.get("mode", "manual")
+                        data.get("quiz"),
+                        data.get("mode", "manual"),
+                        randomize_questions=data.get("randomize_questions", False),
                     )
                 persist_room(get_room(code))
                 self.send_json(

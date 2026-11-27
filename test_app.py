@@ -50,6 +50,28 @@ class QuizValidationTests(unittest.TestCase):
         self.assertEqual(quiz["title"], "Test Quiz")
         self.assertEqual(quiz["questions"][0]["answers"][1]["text"], "Right")
 
+    def test_json_quiz_omits_blank_answer_fields(self):
+        quiz = validate_quiz(
+            {
+                "title": "Blank answer",
+                "questions": [
+                    {
+                        "question": "Pick an answer",
+                        "answers": [
+                            {"text": "Wrong"},
+                            {"text": "  "},
+                            {"text": "Right", "correct": True},
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [answer["text"] for answer in quiz["questions"][0]["answers"]],
+            ["Wrong", "Right"],
+        )
+
     def test_question_requires_exactly_one_correct_answer(self):
         quiz = {
             "title": "Bad Quiz",
@@ -63,21 +85,42 @@ class QuizValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(RequestError, "exactly one"):
             validate_quiz(quiz)
 
-    def test_csv_import_fills_blank_choices_and_reports_skipped_rows(self):
+    def test_csv_import_omits_blank_choices_and_reports_skipped_rows(self):
         quiz, warnings = parse_csv_quiz(SAMPLE_CSV, "CSV Test")
 
         self.assertEqual(len(quiz["questions"]), 1)
         self.assertEqual(quiz["questions"][0]["category"], "Mix")
         self.assertEqual(
             [answer["text"] for answer in quiz["questions"][0]["answers"]],
-            ["Alpha", "x", "Charlie", "x", "x"],
+            ["Alpha", "Charlie"],
         )
         self.assertEqual(
             [answer["correct"] for answer in quiz["questions"][0]["answers"]],
-            [True, False, False, False, False],
+            [True, False],
         )
         self.assertEqual(len(warnings), 1)
         self.assertIn("row 3 skipped: the correct answer is blank", warnings[0])
+
+    def test_csv_import_allows_different_answer_counts_per_question(self):
+        content = (
+            "Question,A,B,C,D,E,Correct answer\n"
+            "Five choices,One,Two,Three,Four,Five,Five\n"
+            "Four choices,Red,Blue,Green,,Yellow,Red\n"
+        )
+        quiz, warnings = parse_csv_quiz(content, "Variable choices")
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [len(question["answers"]) for question in quiz["questions"]],
+            [5, 4],
+        )
+        self.assertTrue(
+            all(
+                answer["text"]
+                for question in quiz["questions"]
+                for answer in question["answers"]
+            )
+        )
 
     def test_csv_import_fails_when_no_rows_have_a_correct_answer(self):
         csv_content = "Pytanie,A,B,Poprawna odp\nQuestion,A,B,\n"
@@ -823,6 +866,73 @@ class QuizApiTests(unittest.TestCase):
         )
         self.assertEqual(state["correct_answer"], "Right")
         self.assertEqual(state["players"][0]["score"], 1)
+
+    def test_room_creation_option_randomizes_questions_for_everyone(self):
+        quiz = {
+            "title": "Question order",
+            "questions": [
+                {
+                    "question": "First question",
+                    "answers": [{"text": "A"}, {"text": "B", "correct": True}],
+                },
+                {
+                    "question": "Second question",
+                    "answers": [{"text": "C"}, {"text": "D", "correct": True}],
+                },
+            ],
+        }
+        with patch("app.random.shuffle", side_effect=lambda values: values.reverse()):
+            for randomize, expected_question in (
+                (False, "First question"),
+                (True, "Second question"),
+            ):
+                status, room = self.request(
+                    "/api/rooms",
+                    {"quiz": quiz, "randomize_questions": randomize},
+                )
+                self.assertEqual(status, 201)
+                self.request(
+                    "/api/host/action",
+                    {
+                        "room_code": room["room_code"],
+                        "host_token": room["host_token"],
+                        "action": "start",
+                    },
+                )
+                _, state = self.request(
+                    "/api/state?room={}".format(room["room_code"])
+                )
+                self.assertEqual(state["question"]["text"], expected_question)
+
+    def test_csv_room_creation_can_randomize_question_order(self):
+        csv_content = (
+            "Question,A,B,Correct answer\n"
+            "First question,A,B,A\n"
+            "Second question,C,D,C\n"
+        )
+        with patch("app.random.shuffle", side_effect=lambda values: values.reverse()):
+            status, room = self.request(
+                "/api/rooms",
+                {
+                    "quiz_csv": csv_content,
+                    "quiz_title": "CSV question order",
+                    "randomize_questions": True,
+                },
+            )
+            self.assertEqual(status, 201)
+            self.request(
+                "/api/host/action",
+                {
+                    "room_code": room["room_code"],
+                    "host_token": room["host_token"],
+                    "action": "start",
+                },
+            )
+            _, state = self.request(
+                "/api/state?room={}".format(room["room_code"])
+            )
+
+        self.assertEqual(state["question"]["text"], "Second question")
 
     def test_player_can_rejoin_same_seat_with_personal_code(self):
         status, room = self.request("/api/rooms", {"quiz": VALID_QUIZ})

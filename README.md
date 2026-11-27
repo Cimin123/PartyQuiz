@@ -22,7 +22,7 @@ To use another port, run `python app.py 9000`.
 
 ## Quiz JSON format
 
-Start with [sample_quiz.json](sample_quiz.json). A quiz has a title and 1–100 questions. Each question has 2–6 answer objects and exactly one answer marked `"correct": true`.
+Start with [sample_quiz.json](sample_quiz.json). A quiz has a title and 1–100 questions. Each question has 2–6 non-empty answers and exactly one answer marked `"correct": true`; blank answer fields are omitted.
 
 ```json
 {
@@ -42,7 +42,7 @@ Start with [sample_quiz.json](sample_quiz.json). A quiz has a title and 1–100 
 
 Each correct answer earns one point. In automatic mode, all players need to answer before the result is revealed and the three-second transition begins, unless the host chooses **Reveal now**. An early reveal scores submitted answers and leaves unanswered players at zero. When the game ends, both the host and players can return to the start screen to create or join another game.
 
-Answer choices are shuffled once when a room is created. The same order is used for everyone and is preserved if the room is restored from a snapshot.
+Answer choices are shuffled once when a room is created. The host can also enable **Randomize question order** when creating a room; that order is shared by everyone and preserved if the room is restored from a snapshot.
 
 Each player gets five personal power-ups, each usable once per game: 50:50 hides half the answer choices (all incorrect) for that player, Scout shows anonymous counts of other players' submitted answers, Call a friend is an honor-rule prompt, Second Chance marks a player's first guess wrong and lets them make one different guess without revealing the correct choice, and Memory test hides answer text for one other random player until the reveal, leaving only the choice letters visible. In automatic mode, a five-second retry window opens once everyone has answered if a player using Second Chance still needs their retry.
 
@@ -50,4 +50,4 @@ Every fifth question gets one randomly selected modifier, shown to both the host
 
 ## Quiz CSV format
 
-The host can also import a comma-separated CSV with headers `Pytanie` (or `Question`), `A`–`E`, and `Poprawna odp` (or `Correct answer`). An optional `Kategoria`/`Category` column is shown with each question. An optional `Include` column can exclude rows by setting it to `0`, `false`, `no`, or `nie`. Empty answer cells become `x`. Rows without a question or a correct answer matching exactly one choice are skipped and reported in the lobby. JSON import remains supported.
+The host can also import a comma-separated CSV with headers `Pytanie` (or `Question`), `A`–`E`, and `Poprawna odp` (or `Correct answer`). An optional `Kategoria`/`Category` column is shown with each question. An optional `Include` column can exclude rows by setting it to `0`, `false`, `no`, or `nie`. Empty answer cells are omitted, so questions can have different numbers of choices; each question still needs at least two non-empty answers. Rows without a question or a correct answer matching exactly one choice are skipped and reported in the lobby. JSON import remains supported.
