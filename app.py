@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import math
+import os
 import random
 import secrets
 import socket
@@ -10,6 +11,7 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -20,9 +22,13 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 MAX_BODY_SIZE = 1_000_000
 AUTO_ADVANCE_SECONDS = 3
+ROOM_SNAPSHOT_INTERVAL_SECONDS = 3 * 60
 ROOM_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+PLAYER_REJOIN_CODE_LENGTH = 8
+SNAPSHOT_VERSION = 2
 ROOMS = {}
 ROOMS_LOCK = threading.RLock()
+SNAPSHOT_DIR = ROOT / "snapshots"
 
 
 class RequestError(Exception):
@@ -129,12 +135,12 @@ PLAYER_POWERUPS = (
     {
         "key": "second_chance",
         "name": "Second chance",
-        "description": "Unlock one answer change before the reveal. In auto mode, activate before your answer if you may be last.",
+        "description": "If your first guess is wrong, you can make one different guess before the reveal.",
     },
     {
         "key": "hide_answers",
         "name": "Memory test",
-        "description": "Hide the answer text for yourself; only the A, B, C, D, E labels stay visible.",
+        "description": "Hide the answer text for one other random player until the reveal.",
     },
 )
 PLAYER_POWERUP_KEYS = {powerup["key"] for powerup in PLAYER_POWERUPS}
@@ -382,9 +388,11 @@ class QuizRoom:
         self.question_index = -1
         self.answers = {}
         self.second_chance_deadline = None
+        self.modifier = None
+        self.question_started_at = None
         self.lock = threading.RLock()
 
-    def public_state(self, player_id=None):
+    def public_state(self, player_id=None, include_reconnect_codes=False):
         with self.lock:
             question = None
             correct_answer = None
@@ -427,14 +435,19 @@ class QuizRoom:
                     )
                     correct_answer = current["answers"][correct_answer_index]["text"]
 
-            players = [
-                {
+            players = []
+            for current_player_id, player in self.players.items():
+                player_state = {
                     "name": player["name"],
                     "score": player["score"],
-                    "has_answered": player_id in self.answers,
+                    "has_answered": (
+                        current_player_id in self.answers
+                        and not player["second_chance_wrong_answer"]
+                    ),
                 }
-                for player_id, player in self.players.items()
-            ]
+                if include_reconnect_codes:
+                    player_state["reconnect_code"] = player["reconnect_code"]
+                players.append(player_state)
             response = {
                 "room_code": self.code,
                 "title": self.quiz["title"],
@@ -466,9 +479,19 @@ class QuizRoom:
                         "scout_available": any(
                             other_player_id != player_id
                             for other_player_id in self.answers
+                            if not self.players[other_player_id][
+                                "second_chance_wrong_answer"
+                            ]
                         ),
                         "can_change_answer": player["can_change_answer"],
+                        "second_chance_wrong_answer": player[
+                            "second_chance_wrong_answer"
+                        ],
                         "hide_answers": hide_answers,
+                        "hide_answers_available": (
+                            self.phase == "question"
+                            and bool(self._eligible_hide_answer_targets(player_id))
+                        ),
                     }
                 )
             if player_id in self.players and player_id in self.answers:
@@ -482,16 +505,328 @@ class QuizRoom:
             if len(self.players) >= 100:
                 raise RequestError("This room is full.", 409)
             player_id = secrets.token_urlsafe(18)
+            reconnect_code = self._new_reconnect_code()
             self.players[player_id] = {
                 "name": name,
                 "score": 0,
+                "reconnect_code": reconnect_code,
                 "used_powerups": set(),
                 "eliminated_answers": [],
                 "scouted_votes": None,
                 "can_change_answer": False,
+                "second_chance_wrong_answer": False,
                 "hide_answers": False,
             }
             return player_id
+
+    def _new_reconnect_code(self):
+        used_codes = {
+            player["reconnect_code"] for player in self.players.values()
+        }
+        while True:
+            code = "".join(
+                secrets.choice(ROOM_ALPHABET)
+                for _ in range(PLAYER_REJOIN_CODE_LENGTH)
+            )
+            if code not in used_codes:
+                return code
+
+    def _eligible_hide_answer_targets(self, player_id):
+        return [
+            other_player_id
+            for other_player_id, player in self.players.items()
+            if other_player_id != player_id
+            and not player["hide_answers"]
+            and (
+                other_player_id not in self.answers
+                or player["second_chance_wrong_answer"]
+            )
+        ]
+
+    def rejoin_player(self, reconnect_code):
+        if not isinstance(reconnect_code, str):
+            raise RequestError("Reconnect code was not found.", 404)
+        normalized_code = reconnect_code.strip().upper()
+        with self.lock:
+            for player_id, player in self.players.items():
+                if secrets.compare_digest(
+                    normalized_code, player["reconnect_code"]
+                ):
+                    return player_id
+        raise RequestError("Reconnect code was not found in this room.", 404)
+
+    def snapshot_data(self):
+        with self.lock:
+            players = [
+                {
+                    "player_id": player_id,
+                    "name": player["name"],
+                    "score": player["score"],
+                    "reconnect_code": player["reconnect_code"],
+                    "used_powerups": sorted(player["used_powerups"]),
+                    "eliminated_answers": list(player["eliminated_answers"]),
+                    "scouted_votes": (
+                        list(player["scouted_votes"])
+                        if player["scouted_votes"] is not None
+                        else None
+                    ),
+                    "can_change_answer": player["can_change_answer"],
+                    "second_chance_wrong_answer": player[
+                        "second_chance_wrong_answer"
+                    ],
+                    "hide_answers": player["hide_answers"],
+                }
+                for player_id, player in self.players.items()
+            ]
+            leaderboard = [
+                {
+                    "name": player["name"],
+                    "score": player["score"],
+                    "reconnect_code": player["reconnect_code"],
+                    "has_answered": player["player_id"] in self.answers,
+                }
+                for player in players
+            ]
+            leaderboard.sort(key=lambda player: (-player["score"], player["name"].casefold()))
+            question_elapsed = None
+            if self.phase == "question" and self.question_started_at is not None:
+                question_elapsed = max(
+                    0, time.monotonic() - self.question_started_at
+                )
+            second_chance_remaining = None
+            if self.second_chance_deadline is not None:
+                second_chance_remaining = max(
+                    0, self.second_chance_deadline - time.monotonic()
+                )
+            return {
+                "version": SNAPSHOT_VERSION,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "room_code": self.code,
+                "host_token": self.host_token,
+                "title": self.quiz["title"],
+                "mode": self.mode,
+                "phase": self.phase,
+                "question_number": self.question_index + 1 if self.question_index >= 0 else None,
+                "question_index": self.question_index,
+                "question_elapsed_seconds": question_elapsed,
+                "second_chance_seconds_remaining": second_chance_remaining,
+                "modifier": self.modifier.key if self.modifier is not None else None,
+                "quiz": self.quiz,
+                "players": players,
+                "leaderboard": leaderboard,
+                "answers": dict(self.answers),
+            }
+
+    @classmethod
+    def from_snapshot(cls, data):
+        if not isinstance(data, dict):
+            raise ValueError("Unsupported snapshot format.")
+        snapshot_version = data.get("version")
+        if (
+            not isinstance(snapshot_version, int)
+            or isinstance(snapshot_version, bool)
+            or snapshot_version not in (1, SNAPSHOT_VERSION)
+        ):
+            raise ValueError("Unsupported snapshot format.")
+        code = data.get("room_code")
+        host_token = data.get("host_token")
+        mode = data.get("mode")
+        phase = data.get("phase")
+        question_index = data.get("question_index")
+        if not isinstance(code, str) or not code:
+            raise ValueError("Snapshot has an invalid room code.")
+        if not isinstance(host_token, str) or not host_token:
+            raise ValueError("Snapshot has an invalid host token.")
+        if mode not in ("manual", "auto"):
+            raise ValueError("Snapshot has an invalid game mode.")
+        if phase not in ("lobby", "question", "revealed", "completed"):
+            raise ValueError("Snapshot has an invalid game phase.")
+        if (
+            not isinstance(question_index, int)
+            or isinstance(question_index, bool)
+            or question_index < -1
+        ):
+            raise ValueError("Snapshot has an invalid question index.")
+        quiz = validate_quiz(data.get("quiz"))
+        if question_index >= len(quiz["questions"]):
+            raise ValueError("Snapshot question index is outside the quiz.")
+        if (phase == "lobby") != (question_index == -1):
+            raise ValueError("Snapshot phase and question index do not match.")
+
+        modifier_key = data.get("modifier")
+        modifier = None
+        if modifier_key is not None:
+            modifier = next(
+                (item for item in QuestionModifier.ALL if item.key == modifier_key),
+                None,
+            )
+            if modifier is None:
+                raise ValueError("Snapshot has an unknown question modifier.")
+
+        room = cls(code, quiz, host_token, mode)
+        room.phase = phase
+        room.question_index = question_index
+        room.modifier = modifier
+        player_records = data.get("players")
+        if not isinstance(player_records, list) or len(player_records) > 100:
+            raise ValueError("Snapshot has an invalid player list.")
+        used_reconnect_codes = set()
+        for record in player_records:
+            if not isinstance(record, dict):
+                raise ValueError("Snapshot has an invalid player record.")
+            player_id = record.get("player_id")
+            name = record.get("name")
+            score = record.get("score")
+            reconnect_code = record.get("reconnect_code")
+            used_powerups = record.get("used_powerups")
+            eliminated_answers = record.get("eliminated_answers")
+            scouted_votes = record.get("scouted_votes")
+            can_change_answer = record.get("can_change_answer")
+            second_chance_wrong_answer = record.get(
+                "second_chance_wrong_answer", False
+            )
+            hide_answers = (
+                record.get("hide_answers", False)
+                if snapshot_version >= SNAPSHOT_VERSION
+                else False
+            )
+            if (
+                not isinstance(player_id, str)
+                or not player_id
+                or player_id in room.players
+                or not isinstance(name, str)
+                or not name
+                or not isinstance(score, int)
+                or isinstance(score, bool)
+                or not isinstance(reconnect_code, str)
+                or len(reconnect_code) != PLAYER_REJOIN_CODE_LENGTH
+                or any(character not in ROOM_ALPHABET for character in reconnect_code)
+                or reconnect_code in used_reconnect_codes
+                or not isinstance(used_powerups, list)
+                or any(key not in PLAYER_POWERUP_KEYS for key in used_powerups)
+                or not isinstance(eliminated_answers, list)
+                or any(
+                    not isinstance(index, int) or isinstance(index, bool)
+                    for index in eliminated_answers
+                )
+                or (
+                    scouted_votes is not None
+                    and (
+                        not isinstance(scouted_votes, list)
+                        or any(
+                            not isinstance(count, int)
+                            or isinstance(count, bool)
+                            or count < 0
+                            for count in scouted_votes
+                        )
+                    )
+                )
+                or not isinstance(can_change_answer, bool)
+                or not isinstance(second_chance_wrong_answer, bool)
+                or not isinstance(hide_answers, bool)
+            ):
+                raise ValueError("Snapshot has an invalid player record.")
+            used_reconnect_codes.add(reconnect_code)
+            room.players[player_id] = {
+                "name": name,
+                "score": score,
+                "reconnect_code": reconnect_code,
+                "used_powerups": set(used_powerups),
+                "eliminated_answers": list(eliminated_answers),
+                "scouted_votes": (
+                    list(scouted_votes) if scouted_votes is not None else None
+                ),
+                "can_change_answer": can_change_answer,
+                "second_chance_wrong_answer": second_chance_wrong_answer,
+                "hide_answers": hide_answers,
+            }
+
+        answers = data.get("answers")
+        if not isinstance(answers, dict):
+            raise ValueError("Snapshot has invalid submitted answers.")
+        for player_id, answer_index in answers.items():
+            if (
+                player_id not in room.players
+                or not isinstance(answer_index, int)
+                or isinstance(answer_index, bool)
+                or question_index < 0
+                or not 0
+                <= answer_index
+                < len(quiz["questions"][question_index]["answers"])
+            ):
+                raise ValueError("Snapshot has invalid submitted answers.")
+        room.answers = answers
+
+        elapsed = data.get("question_elapsed_seconds")
+        if elapsed is None:
+            elapsed = 0
+        if (
+            not isinstance(elapsed, (int, float))
+            or isinstance(elapsed, bool)
+            or not math.isfinite(elapsed)
+            or elapsed < 0
+        ):
+            raise ValueError("Snapshot has invalid question timing.")
+        remaining = data.get("second_chance_seconds_remaining")
+        if remaining is not None and (
+            not isinstance(remaining, (int, float))
+            or isinstance(remaining, bool)
+            or not math.isfinite(remaining)
+            or remaining < 0
+        ):
+            raise ValueError("Snapshot has invalid second-chance timing.")
+        if phase != "question" and remaining is not None:
+            raise ValueError("Snapshot has invalid second-chance timing.")
+        room._restore_timers(elapsed, remaining)
+        return room
+
+    def _restore_timers(self, elapsed, second_chance_remaining):
+        if self.phase == "question":
+            now = time.monotonic()
+            self.question_started_at = now - elapsed
+            if second_chance_remaining is not None:
+                self.second_chance_deadline = now + second_chance_remaining
+            time_remaining = (
+                self.modifier.time_limit - elapsed
+                if self.modifier is not None
+                and self.modifier.time_limit is not None
+                else None
+            )
+            if (
+                second_chance_remaining is not None
+                and second_chance_remaining <= 0
+            ) or (
+                time_remaining is not None
+                and time_remaining <= 0
+                and self.second_chance_deadline is None
+            ):
+                self.second_chance_deadline = None
+                self._reveal_locked()
+                return
+            if time_remaining is not None and time_remaining > 0:
+                timer = threading.Timer(
+                    time_remaining,
+                    self._question_timeout,
+                    args=(self.question_index,),
+                )
+                timer.daemon = True
+                timer.start()
+            if second_chance_remaining is not None:
+                timer = threading.Timer(
+                    second_chance_remaining,
+                    self._auto_reveal_after_second_chance,
+                    args=(self.question_index,),
+                )
+                timer.daemon = True
+                timer.start()
+        elif self.phase == "revealed" and self.mode == "auto":
+            timer = threading.Timer(
+                AUTO_ADVANCE_SECONDS,
+                self._auto_advance,
+                args=(self.question_index,),
+            )
+            timer.daemon = True
+            timer.start()
 
     def submit_answer(self, player_id, answer_index):
         with self.lock:
@@ -530,12 +865,26 @@ class QuizRoom:
                 raise RequestError("That answer does not exist.")
             if answer_index in player["eliminated_answers"]:
                 raise RequestError("That answer was eliminated by your 50:50 power-up.", 409)
+            if (
+                already_answered
+                and player["second_chance_wrong_answer"]
+                and answer_index == self.answers[player_id]
+            ):
+                raise RequestError(
+                    "Choose a different answer for your second guess.", 409
+                )
             self.answers[player_id] = answer_index
             if already_answered:
                 player["can_change_answer"] = False
+                player["second_chance_wrong_answer"] = False
+            elif player["can_change_answer"]:
+                player["second_chance_wrong_answer"] = not answers[answer_index][
+                    "correct"
+                ]
+                if not player["second_chance_wrong_answer"]:
+                    player["can_change_answer"] = False
             if (
-                not already_answered
-                and self.mode == "auto"
+                self.mode == "auto"
                 and self.players
                 and len(self.answers) == len(self.players)
             ):
@@ -563,7 +912,7 @@ class QuizRoom:
                 raise RequestError("You have already used this power-up.", 409)
             already_answered = player_id in self.answers
             is_second_chance = powerup_key == "second_chance"
-            if not is_second_chance and already_answered:
+            if already_answered:
                 raise RequestError(
                     "Use this power-up before submitting your answer.", 409
                 )
@@ -573,11 +922,6 @@ class QuizRoom:
                 and self.modifier.time_limit is not None
                 and time.monotonic() - self.question_started_at
                 >= self.modifier.time_limit
-                and not (
-                    is_second_chance
-                    and self.mode == "auto"
-                    and self.second_chance_deadline is not None
-                )
             ):
                 self._reveal_locked()
                 raise RequestError("Time is up for this question.", 409)
@@ -606,6 +950,9 @@ class QuizRoom:
                     answer_index
                     for other_player_id, answer_index in self.answers.items()
                     if other_player_id != player_id
+                    and not self.players[other_player_id][
+                        "second_chance_wrong_answer"
+                    ]
                 ]
                 if not other_answers:
                     raise RequestError(
@@ -619,7 +966,14 @@ class QuizRoom:
                     votes[answer_index] += 1
                 player["scouted_votes"] = votes
             elif powerup_key == "hide_answers":
-                player["hide_answers"] = True
+                eligible_targets = self._eligible_hide_answer_targets(player_id)
+                if not eligible_targets:
+                    raise RequestError(
+                        "Memory test requires another player who has not locked an answer.",
+                        409,
+                    )
+                target_id = random.choice(eligible_targets)
+                self.players[target_id]["hide_answers"] = True
             elif is_second_chance:
                 player["can_change_answer"] = True
 
@@ -642,8 +996,6 @@ class QuizRoom:
                 return
 
             if action == "reveal" and self.phase == "question":
-                if self.mode == "auto":
-                    raise RequestError("Answers are revealed automatically in this mode.", 409)
                 self._reveal_locked()
                 return
 
@@ -668,6 +1020,7 @@ class QuizRoom:
         self.second_chance_deadline = None
         for player in self.players.values():
             player["can_change_answer"] = False
+            player["second_chance_wrong_answer"] = False
         if self.mode == "auto":
             timer = threading.Timer(
                 AUTO_ADVANCE_SECONDS,
@@ -684,6 +1037,7 @@ class QuizRoom:
             player["eliminated_answers"] = []
             player["scouted_votes"] = None
             player["can_change_answer"] = False
+            player["second_chance_wrong_answer"] = False
             player["hide_answers"] = False
         self.modifier = QuestionModifier.for_question(self.question_index + 1)
         self.question_started_at = time.monotonic()
@@ -709,20 +1063,22 @@ class QuizRoom:
 
     def _begin_auto_reveal_locked(self):
         if any(
-            player["can_change_answer"]
+            player["second_chance_wrong_answer"]
             for player in self.players.values()
         ):
-            self.second_chance_deadline = (
-                time.monotonic() + SECOND_CHANCE_WINDOW_SECONDS
-            )
-            timer = threading.Timer(
-                SECOND_CHANCE_WINDOW_SECONDS,
-                self._auto_reveal_after_second_chance,
-                args=(self.question_index,),
-            )
-            timer.daemon = True
-            timer.start()
+            if self.second_chance_deadline is None:
+                self.second_chance_deadline = (
+                    time.monotonic() + SECOND_CHANCE_WINDOW_SECONDS
+                )
+                timer = threading.Timer(
+                    SECOND_CHANCE_WINDOW_SECONDS,
+                    self._auto_reveal_after_second_chance,
+                    args=(self.question_index,),
+                )
+                timer.daemon = True
+                timer.start()
             return
+        self.second_chance_deadline = None
         self._reveal_locked()
 
     def _auto_reveal_after_second_chance(self, question_index):
@@ -764,6 +1120,79 @@ class QuizRoom:
         self._start_question_locked()
 
 
+class SnapshotStore:
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.lock = threading.Lock()
+
+    def save_room(self, room):
+        with self.lock:
+            snapshot = room.snapshot_data()
+            content = json.dumps(snapshot, ensure_ascii=False, indent=2)
+            self.directory.mkdir(parents=True, exist_ok=True)
+            path = self.directory / "{}.json".format(room.code)
+            temporary_path = self.directory / "{}.{}.tmp".format(
+                room.code, secrets.token_hex(4)
+            )
+            temporary_path.write_text(content, encoding="utf-8")
+            os.replace(str(temporary_path), str(path))
+
+    def load_rooms(self):
+        if not self.directory.exists():
+            return []
+        restored = []
+        for path in sorted(self.directory.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                room = QuizRoom.from_snapshot(data)
+                if path.stem.upper() != room.code.upper():
+                    raise ValueError("Snapshot filename does not match its room code.")
+            except (OSError, ValueError, TypeError, KeyError, RequestError) as error:
+                print(
+                    "Could not restore room snapshot {}: {}".format(path, error),
+                    file=sys.stderr,
+                )
+                continue
+            restored.append(room)
+        return restored
+
+
+SNAPSHOT_STORE = SnapshotStore(SNAPSHOT_DIR)
+
+
+def persist_room(room):
+    try:
+        SNAPSHOT_STORE.save_room(room)
+    except OSError as error:
+        print(
+            "Could not save snapshot for room {}: {}".format(room.code, error),
+            file=sys.stderr,
+        )
+
+
+def persist_all_rooms():
+    with ROOMS_LOCK:
+        rooms = list(ROOMS.values())
+    for room in rooms:
+        persist_room(room)
+
+
+def restore_saved_rooms():
+    restored = SNAPSHOT_STORE.load_rooms()
+    with ROOMS_LOCK:
+        for room in restored:
+            if room.code in ROOMS:
+                print(
+                    "Could not restore room {}: room code is already in use.".format(
+                        room.code
+                    ),
+                    file=sys.stderr,
+                )
+                continue
+            ROOMS[room.code] = room
+    print("Restored {} saved quiz room(s).".format(len(restored)))
+
+
 def create_room(quiz_data=None, mode="manual", csv_content=None, quiz_title=None):
     if mode not in ("manual", "auto"):
         raise RequestError("Game mode must be 'manual' or 'auto'.")
@@ -772,6 +1201,8 @@ def create_room(quiz_data=None, mode="manual", csv_content=None, quiz_title=None
         import_warnings = []
     else:
         quiz, import_warnings = parse_csv_quiz(csv_content, quiz_title)
+    for question in quiz["questions"]:
+        random.shuffle(question["answers"])
     with ROOMS_LOCK:
         for _ in range(10):
             code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(5))
@@ -802,7 +1233,20 @@ class QuizRequestHandler(BaseHTTPRequestHandler):
             code = params.get("room", [""])[0]
             player_id = params.get("player", [None])[0]
             try:
-                self.send_json(200, get_room(code).public_state(player_id))
+                room = get_room(code)
+                host_token = self.headers.get("X-Host-Token", "")
+                include_reconnect_codes = (
+                    player_id is None
+                    and bool(host_token)
+                    and secrets.compare_digest(host_token, room.host_token)
+                )
+                self.send_json(
+                    200,
+                    room.public_state(
+                        player_id,
+                        include_reconnect_codes=include_reconnect_codes,
+                    ),
+                )
             except RequestError as error:
                 self.send_error_json(error)
             return
@@ -843,6 +1287,7 @@ class QuizRequestHandler(BaseHTTPRequestHandler):
                     code, host_token, import_warnings = create_room(
                         data.get("quiz"), data.get("mode", "manual")
                     )
+                persist_room(get_room(code))
                 self.send_json(
                     201,
                     {
@@ -854,23 +1299,53 @@ class QuizRequestHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/join":
                 code = self.required_string(data, "room_code", 5)
                 name = self.required_string(data, "name", 30)
-                player_id = get_room(code).add_player(name)
-                self.send_json(201, {"room_code": code.upper(), "player_id": player_id})
+                room = get_room(code)
+                player_id = room.add_player(name)
+                persist_room(room)
+                self.send_json(
+                    201,
+                    {
+                        "room_code": code.upper(),
+                        "player_id": player_id,
+                        "reconnect_code": room.players[player_id]["reconnect_code"],
+                    },
+                )
+            elif self.path == "/api/rejoin":
+                code = self.required_string(data, "room_code", 5)
+                reconnect_code = self.required_string(
+                    data, "reconnect_code", PLAYER_REJOIN_CODE_LENGTH
+                )
+                room = get_room(code)
+                player_id = room.rejoin_player(reconnect_code)
+                self.send_json(
+                    200,
+                    {
+                        "room_code": code.upper(),
+                        "player_id": player_id,
+                        "reconnect_code": room.players[player_id]["reconnect_code"],
+                    },
+                )
             elif self.path == "/api/answer":
                 code = self.required_string(data, "room_code", 5)
                 player_id = self.required_string(data, "player_id", 100)
-                get_room(code).submit_answer(player_id, data.get("answer_index"))
+                room = get_room(code)
+                room.submit_answer(player_id, data.get("answer_index"))
+                persist_room(room)
                 self.send_json(200, {"ok": True})
             elif self.path == "/api/powerup":
                 code = self.required_string(data, "room_code", 5)
                 player_id = self.required_string(data, "player_id", 100)
-                get_room(code).activate_powerup(player_id, data.get("powerup"))
+                room = get_room(code)
+                room.activate_powerup(player_id, data.get("powerup"))
+                persist_room(room)
                 self.send_json(200, {"ok": True})
             elif self.path == "/api/host/action":
                 code = self.required_string(data, "room_code", 5)
                 host_token = self.required_string(data, "host_token", 100)
                 action = self.required_string(data, "action", 20)
-                get_room(code).host_action(host_token, action)
+                room = get_room(code)
+                room.host_action(host_token, action)
+                persist_room(room)
                 self.send_json(200, {"ok": True})
             else:
                 self.send_error_json(RequestError("Not found.", 404))
@@ -927,9 +1402,22 @@ def lan_addresses():
     return sorted(addresses)
 
 
+def snapshot_loop(stop_event):
+    while not stop_event.wait(ROOM_SNAPSHOT_INTERVAL_SECONDS):
+        persist_all_rooms()
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     server = ThreadingHTTPServer(("0.0.0.0", port), QuizRequestHandler)
+    restore_saved_rooms()
+    snapshot_stop = threading.Event()
+    snapshot_thread = threading.Thread(
+        target=snapshot_loop,
+        args=(snapshot_stop,),
+        daemon=True,
+    )
+    snapshot_thread.start()
     print("Quiz server running:")
     print("  Host: http://localhost:{}".format(port))
     for address in lan_addresses():
@@ -940,6 +1428,9 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping quiz server.")
     finally:
+        snapshot_stop.set()
+        snapshot_thread.join()
+        persist_all_rooms()
         server.server_close()
 
 

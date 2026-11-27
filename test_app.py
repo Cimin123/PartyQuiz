@@ -3,6 +3,8 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest.mock import patch
 
@@ -13,7 +15,10 @@ from app import (
     QuestionModifier,
     RequestError,
     SECOND_CHANCE_WINDOW_SECONDS,
+    SnapshotStore,
+    get_room,
     parse_csv_quiz,
+    restore_saved_rooms,
     validate_quiz,
 )
 
@@ -171,39 +176,113 @@ class QuizRoomTests(unittest.TestCase):
 
     def test_second_chance_allows_exactly_one_answer_change(self):
         self.room.host_action("host-secret", "start")
-        self.room.submit_answer(self.player_id, 0)
-
         self.room.activate_powerup(self.player_id, "second_chance")
+        self.room.submit_answer(self.player_id, 0)
+        first_guess_state = self.room.public_state(self.player_id)
         self.assertTrue(
-            self.room.public_state(self.player_id)["can_change_answer"]
+            first_guess_state["can_change_answer"]
         )
+        self.assertTrue(first_guess_state["second_chance_wrong_answer"])
+        self.assertIsNone(first_guess_state["correct_answer"])
+        self.assertIsNone(first_guess_state["correct_answer_index"])
+        self.assertFalse(first_guess_state["players"][0]["has_answered"])
+        with self.assertRaisesRegex(RequestError, "different answer"):
+            self.room.submit_answer(self.player_id, 0)
+
         self.room.submit_answer(self.player_id, 1)
-        self.assertEqual(
-            self.room.public_state(self.player_id)["your_answer"], 1
-        )
+        retry_state = self.room.public_state(self.player_id)
+        self.assertEqual(retry_state["your_answer"], 1)
+        self.assertFalse(retry_state["second_chance_wrong_answer"])
         self.assertFalse(
-            self.room.public_state(self.player_id)["can_change_answer"]
+            retry_state["can_change_answer"]
         )
         with self.assertRaisesRegex(RequestError, "already answered"):
             self.room.submit_answer(self.player_id, 0)
         self.room.host_action("host-secret", "reveal")
         self.assertEqual(self.room.players[self.player_id]["score"], 1)
 
-    def test_memory_test_hides_answers_only_for_the_player_until_reveal(self):
+    def test_second_chance_ends_after_a_wrong_retry(self):
+        room = QuizRoom(
+            "RETRY",
+            validate_quiz(
+                {
+                    "title": "Three choices",
+                    "questions": [
+                        {
+                            "question": "Pick one",
+                            "answers": [
+                                {"text": "Wrong one"},
+                                {"text": "Right", "correct": True},
+                                {"text": "Wrong two"},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            "host-secret",
+        )
+        player_id = room.add_player("Player")
+        room.host_action("host-secret", "start")
+        room.activate_powerup(player_id, "second_chance")
+        room.submit_answer(player_id, 0)
+        room.submit_answer(player_id, 2)
+
+        state = room.public_state(player_id)
+        self.assertFalse(state["can_change_answer"])
+        self.assertFalse(state["second_chance_wrong_answer"])
+        with self.assertRaisesRegex(RequestError, "already answered"):
+            room.submit_answer(player_id, 1)
+
+        room.host_action("host-secret", "reveal")
+        self.assertEqual(room.players[player_id]["score"], 0)
+
+    def test_second_chance_must_be_activated_before_the_first_guess(self):
+        self.room.host_action("host-secret", "start")
+        self.room.submit_answer(self.player_id, 0)
+
+        with self.assertRaisesRegex(RequestError, "before submitting"):
+            self.room.activate_powerup(self.player_id, "second_chance")
+
+        self.assertNotIn(
+            "second_chance",
+            self.room.public_state(self.player_id)["used_powerups"],
+        )
+
+    def test_correct_first_guess_does_not_leave_a_second_chance(self):
+        self.room.host_action("host-secret", "start")
+        self.room.activate_powerup(self.player_id, "second_chance")
+        self.room.submit_answer(self.player_id, 1)
+
+        state = self.room.public_state(self.player_id)
+        self.assertFalse(state["can_change_answer"])
+        self.assertFalse(state["second_chance_wrong_answer"])
+        with self.assertRaisesRegex(RequestError, "already answered"):
+            self.room.submit_answer(self.player_id, 0)
+
+    def test_memory_test_hides_answers_for_a_random_other_player(self):
         room = QuizRoom("MEMRY", validate_quiz(VALID_QUIZ), "host-secret")
         first_player = room.add_player("First")
         second_player = room.add_player("Second")
         room.host_action("host-secret", "start")
 
-        room.activate_powerup(first_player, "hide_answers")
+        with patch("app.random.choice", return_value=second_player) as choose:
+            room.activate_powerup(first_player, "hide_answers")
 
-        hidden_state = room.public_state(first_player)
+        self.assertEqual(
+            choose.call_args.args,
+            ([second_player],),
+        )
+        activator_state = room.public_state(first_player)
+        hidden_state = room.public_state(second_player)
+        self.assertFalse(activator_state["hide_answers"])
+        self.assertEqual(
+            activator_state["question"]["answers"], ["Wrong", "Right"]
+        )
         self.assertTrue(hidden_state["hide_answers"])
         self.assertEqual(hidden_state["question"]["answers"], [None, None])
-        self.assertEqual(
-            room.public_state(second_player)["question"]["answers"],
-            ["Wrong", "Right"],
-        )
+        self.assertIn("hide_answers", activator_state["used_powerups"])
+        self.assertNotIn("hide_answers", hidden_state["used_powerups"])
+        self.assertTrue(hidden_state["hide_answers_available"])
         self.assertEqual(
             room.public_state()["question"]["answers"],
             ["Wrong", "Right"],
@@ -213,10 +292,39 @@ class QuizRoomTests(unittest.TestCase):
 
         room.submit_answer(first_player, 1)
         room.host_action("host-secret", "reveal")
-        revealed_state = room.public_state(first_player)
+        revealed_state = room.public_state(second_player)
         self.assertFalse(revealed_state["hide_answers"])
         self.assertEqual(revealed_state["question"]["answers"], ["Wrong", "Right"])
         self.assertEqual(revealed_state["correct_answer"], "Right")
+
+    def test_memory_test_needs_another_player_who_can_still_answer(self):
+        self.room.host_action("host-secret", "start")
+
+        self.assertFalse(
+            self.room.public_state(self.player_id)["hide_answers_available"]
+        )
+        with self.assertRaisesRegex(RequestError, "another player"):
+            self.room.activate_powerup(self.player_id, "hide_answers")
+        self.assertNotIn(
+            "hide_answers",
+            self.room.public_state(self.player_id)["used_powerups"],
+        )
+
+    def test_memory_test_does_not_target_a_player_who_already_answered(self):
+        room = QuizRoom("MEMRY", validate_quiz(VALID_QUIZ), "host-secret")
+        first_player = room.add_player("First")
+        answered_player = room.add_player("Answered")
+        available_player = room.add_player("Available")
+        room.host_action("host-secret", "start")
+        room.submit_answer(answered_player, 0)
+
+        with patch("app.random.choice", return_value=available_player) as choose:
+            room.activate_powerup(first_player, "hide_answers")
+
+        self.assertEqual(choose.call_args.args, ([available_player],))
+        self.assertFalse(room.public_state(first_player)["hide_answers"])
+        self.assertFalse(room.public_state(answered_player)["hide_answers"])
+        self.assertTrue(room.public_state(available_player)["hide_answers"])
 
     def test_memory_test_must_be_activated_before_answering(self):
         self.room.host_action("host-secret", "start")
@@ -229,6 +337,62 @@ class QuizRoomTests(unittest.TestCase):
             "hide_answers",
             self.room.public_state(self.player_id)["used_powerups"],
         )
+
+    def test_snapshot_restores_question_answers_scores_and_reconnect_codes(self):
+        room = QuizRoom("SNAP1", validate_quiz(VALID_QUIZ), "host-secret")
+        player_id = room.add_player("Player")
+        target_id = room.add_player("Target")
+        room.host_action("host-secret", "start")
+        with patch("app.random.choice", return_value=target_id):
+            room.activate_powerup(player_id, "hide_answers")
+        room.submit_answer(player_id, 1)
+
+        with TemporaryDirectory() as directory:
+            store = SnapshotStore(directory)
+            store.save_room(room)
+            snapshot = json.loads(
+                (Path(directory) / "SNAP1.json").read_text(encoding="utf-8")
+            )
+            restored = store.load_rooms()[0]
+
+        self.assertEqual(snapshot["question_number"], 1)
+        self.assertEqual(snapshot["leaderboard"][0]["score"], 0)
+        reconnect_code = snapshot["leaderboard"][0]["reconnect_code"]
+        self.assertEqual(len(reconnect_code), 8)
+        self.assertEqual(restored.rejoin_player(reconnect_code), player_id)
+        self.assertEqual(
+            restored.public_state(player_id),
+            room.public_state(player_id),
+        )
+        self.assertEqual(
+            restored.public_state(target_id),
+            room.public_state(target_id),
+        )
+        legacy_snapshot = room.snapshot_data()
+        legacy_snapshot["version"] = 1
+        legacy_snapshot["players"][1]["hide_answers"] = True
+        legacy_restored = QuizRoom.from_snapshot(legacy_snapshot)
+        self.assertFalse(legacy_restored.public_state(target_id)["hide_answers"])
+
+    def test_startup_restores_all_saved_rooms(self):
+        room = QuizRoom("RESTO", validate_quiz(VALID_QUIZ), "host-secret")
+        player_id = room.add_player("Player")
+        room.host_action("host-secret", "start")
+        room.submit_answer(player_id, 1)
+
+        with TemporaryDirectory() as directory:
+            store = SnapshotStore(directory)
+            store.save_room(room)
+            with patch("app.SNAPSHOT_STORE", store), patch.dict(
+                "app.ROOMS", {}, clear=True
+            ):
+                restore_saved_rooms()
+                restored = get_room("RESTO")
+
+                self.assertEqual(
+                    restored.public_state(player_id),
+                    room.public_state(player_id),
+                )
 
     def test_modifier_is_selected_only_for_every_fifth_question(self):
         modifier = QuestionModifier.ALL[0]
@@ -484,20 +648,48 @@ class QuizRoomTests(unittest.TestCase):
         self.assertEqual(len(timers), 1)
         self.assertEqual(timers[0].interval, AUTO_ADVANCE_SECONDS)
 
-    def test_auto_mode_requires_players_and_disables_manual_controls(self):
+    def test_auto_mode_requires_players_and_host_can_reveal_early(self):
         room = QuizRoom("ABCDE", validate_quiz(VALID_QUIZ), "host-secret", "auto")
         with self.assertRaisesRegex(RequestError, "At least one player"):
             room.host_action("host-secret", "start")
 
-        room.add_player("Player")
+        answered_player = room.add_player("Answered")
+        unanswered_player = room.add_player("Unanswered")
         room.host_action("host-secret", "start")
-        with self.assertRaisesRegex(RequestError, "revealed automatically"):
+        room.submit_answer(answered_player, 1)
+
+        timers = []
+
+        class CapturedTimer:
+            def __init__(self, interval, function, args=(), kwargs=None):
+                self.interval = interval
+                self.function = function
+                self.args = args
+                timers.append(self)
+
+            def start(self):
+                pass
+
+        with patch("app.threading.Timer", CapturedTimer):
             room.host_action("host-secret", "reveal")
+
+        state = room.public_state()
+        self.assertEqual(state["phase"], "revealed")
+        self.assertEqual(state["correct_answer"], "Right")
+        self.assertEqual(room.players[answered_player]["score"], 1)
+        self.assertEqual(room.players[unanswered_player]["score"], 0)
+        self.assertEqual(len(timers), 1)
+        self.assertEqual(timers[0].interval, AUTO_ADVANCE_SECONDS)
 
 
 class QuizApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.snapshot_directory = TemporaryDirectory()
+        cls.snapshot_store_patch = patch(
+            "app.SNAPSHOT_STORE", SnapshotStore(cls.snapshot_directory.name)
+        )
+        cls.snapshot_store_patch.start()
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), QuizRequestHandler)
         cls.thread = Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -508,13 +700,18 @@ class QuizApiTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
+        cls.snapshot_store_patch.stop()
+        cls.snapshot_directory.cleanup()
 
-    def request(self, path, body=None):
+    def request(self, path, body=None, headers=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
+        request_headers = dict(headers or {})
+        if data is not None:
+            request_headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             self.base_url + path,
             data=data,
-            headers={"Content-Type": "application/json"} if data is not None else {},
+            headers=request_headers,
         )
         try:
             response = urllib.request.urlopen(request)
@@ -555,7 +752,7 @@ class QuizApiTests(unittest.TestCase):
             {
                 "room_code": code,
                 "player_id": player["player_id"],
-                "answer_index": 1,
+                "answer_index": state["question"]["answers"].index("Right"),
             },
         )
         self.request(
@@ -566,6 +763,134 @@ class QuizApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(state["correct_answer"], "Right")
         self.assertEqual(state["players"][0]["score"], 1)
+
+    def test_room_creation_shuffles_answer_order_for_all_players(self):
+        with patch(
+            "app.random.shuffle",
+            side_effect=lambda answers: answers.reverse(),
+        ) as shuffle:
+            status, room = self.request("/api/rooms", {"quiz": VALID_QUIZ})
+            self.assertEqual(status, 201)
+            _, first_player = self.request(
+                "/api/join", {"room_code": room["room_code"], "name": "First"}
+            )
+            _, second_player = self.request(
+                "/api/join", {"room_code": room["room_code"], "name": "Second"}
+            )
+            self.request(
+                "/api/host/action",
+                {
+                    "room_code": room["room_code"],
+                    "host_token": room["host_token"],
+                    "action": "start",
+                },
+            )
+            _, first_state = self.request(
+                "/api/state?room={}&player={}".format(
+                    room["room_code"], first_player["player_id"]
+                )
+            )
+            _, second_state = self.request(
+                "/api/state?room={}&player={}".format(
+                    room["room_code"], second_player["player_id"]
+                )
+            )
+
+        self.assertEqual(shuffle.call_count, 1)
+        self.assertEqual(first_state["question"]["answers"], ["Right", "Wrong"])
+        self.assertEqual(
+            first_state["question"]["answers"],
+            second_state["question"]["answers"],
+        )
+        self.request(
+            "/api/answer",
+            {
+                "room_code": room["room_code"],
+                "player_id": first_player["player_id"],
+                "answer_index": 0,
+            },
+        )
+        self.request(
+            "/api/host/action",
+            {
+                "room_code": room["room_code"],
+                "host_token": room["host_token"],
+                "action": "reveal",
+            },
+        )
+        _, state = self.request(
+            "/api/state?room={}".format(room["room_code"])
+        )
+        self.assertEqual(state["correct_answer"], "Right")
+        self.assertEqual(state["players"][0]["score"], 1)
+
+    def test_player_can_rejoin_same_seat_with_personal_code(self):
+        status, room = self.request("/api/rooms", {"quiz": VALID_QUIZ})
+        self.assertEqual(status, 201)
+        status, player = self.request(
+            "/api/join", {"room_code": room["room_code"], "name": "Player"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(len(player["reconnect_code"]), 8)
+
+        self.request(
+            "/api/host/action",
+            {
+                "room_code": room["room_code"],
+                "host_token": room["host_token"],
+                "action": "start",
+            },
+        )
+        status, rejoined = self.request(
+            "/api/rejoin",
+            {
+                "room_code": room["room_code"],
+                "reconnect_code": player["reconnect_code"].lower(),
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(rejoined["player_id"], player["player_id"])
+        self.assertEqual(rejoined["reconnect_code"], player["reconnect_code"])
+
+    def test_only_authenticated_host_state_includes_player_reconnect_codes(self):
+        status, room = self.request("/api/rooms", {"quiz": VALID_QUIZ})
+        self.assertEqual(status, 201)
+        players = []
+        for name in ("First", "Second"):
+            status, player = self.request(
+                "/api/join", {"room_code": room["room_code"], "name": name}
+            )
+            self.assertEqual(status, 201)
+            players.append(player)
+
+        status, public_state = self.request(
+            "/api/state?room={}".format(room["room_code"])
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(
+            all("reconnect_code" not in player for player in public_state["players"])
+        )
+
+        status, host_state = self.request(
+            "/api/state?room={}".format(room["room_code"]),
+            headers={"X-Host-Token": room["host_token"]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            {player["reconnect_code"] for player in host_state["players"]},
+            {player["reconnect_code"] for player in players},
+        )
+
+        status, player_state = self.request(
+            "/api/state?room={}&player={}".format(
+                room["room_code"], players[0]["player_id"]
+            )
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(
+            all("reconnect_code" not in player for player in player_state["players"])
+        )
 
     def test_room_creation_accepts_automatic_mode(self):
         status, room = self.request(

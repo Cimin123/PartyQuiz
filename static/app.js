@@ -3,6 +3,7 @@ const params = new URLSearchParams(location.search);
 const inviteCode = (params.get("room") || "").toUpperCase();
 let activeRoom = "";
 let playerId = "";
+let reconnectCode = "";
 let hostToken = "";
 let role = "";
 let pollTimer = null;
@@ -12,6 +13,7 @@ const storageKeys = {
   room: "quiznight.room",
   role: "quiznight.role",
   player: "quiznight.player",
+  reconnect: "quiznight.reconnect",
   host: "quiznight.host"
 };
 
@@ -60,6 +62,7 @@ async function request(path, data) {
 
 function renderHome() {
   clearInterval(pollTimer);
+  screen.classList.remove("player-game-screen");
   screen.replaceChildren();
 
   const intro = element("section", "intro");
@@ -146,7 +149,24 @@ function renderHome() {
   codeInput.addEventListener("input", () => {
     codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
   });
-  joinForm.append(codeField, field("Player name", "playerName", "What should we call you?"));
+  const playerNameField = field("Player name", "playerName", "What should we call you?");
+  const playerNameInput = playerNameField.querySelector("input");
+  const reconnectField = field("Reconnect code (optional)", "reconnectCode", "ABCD2345");
+  const reconnectInput = reconnectField.querySelector("input");
+  reconnectInput.maxLength = 8;
+  reconnectInput.required = false;
+  reconnectInput.autocomplete = "off";
+  reconnectInput.classList.add("code-input");
+  reconnectInput.addEventListener("input", () => {
+    reconnectInput.value = reconnectInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    playerNameInput.required = !reconnectInput.value.trim();
+  });
+  joinForm.append(
+    codeField,
+    playerNameField,
+    reconnectField,
+    element("span", "field-hint", "Enter your personal code to return to a saved player seat.")
+  );
   const joinSubmit = element("button", "primary secondary", "Join game");
   joinSubmit.type = "submit";
   joinForm.append(joinSubmit);
@@ -154,16 +174,24 @@ function renderHome() {
     event.preventDefault();
     joinSubmit.disabled = true;
     try {
-      const result = await request("/api/join", {
-        room_code: codeInput.value.trim(),
-        name: joinForm.elements.playerName.value.trim()
-      });
+      const reconnect = reconnectInput.value.trim();
+      const result = reconnect
+        ? await request("/api/rejoin", {
+          room_code: codeInput.value.trim(),
+          reconnect_code: reconnect
+        })
+        : await request("/api/join", {
+          room_code: codeInput.value.trim(),
+          name: joinForm.elements.playerName.value.trim()
+        });
       activeRoom = result.room_code;
       playerId = result.player_id;
+      reconnectCode = result.reconnect_code;
       role = "player";
       sessionStorage.setItem(storageKeys.room, activeRoom);
       sessionStorage.setItem(storageKeys.role, role);
       sessionStorage.setItem(storageKeys.player, playerId);
+      sessionStorage.setItem(storageKeys.reconnect, reconnectCode);
       history.replaceState(null, "", "/?room=" + encodeURIComponent(activeRoom));
       startPolling();
     } catch (error) {
@@ -178,6 +206,7 @@ function renderHome() {
 }
 
 function renderLobby(importWarnings = []) {
+  screen.classList.remove("player-game-screen");
   screen.replaceChildren();
   const card = element("section", "card lobby-card");
   card.append(element("p", "eyebrow", "YOUR GAME IS READY"));
@@ -215,15 +244,17 @@ function renderLobby(importWarnings = []) {
 }
 
 function renderGame(state) {
+  screen.classList.toggle("player-game-screen", role === "player");
   screen.replaceChildren();
-  const header = element("div", "game-header");
-  const titleStack = element("div", "");
-  titleStack.append(element("p", "eyebrow", role === "host" ? "HOST VIEW" : "PLAYER VIEW"));
-  titleStack.append(element("h1", "", state.title));
-  header.append(titleStack);
-  const roomPill = element("span", "room-pill", "ROOM " + state.room_code);
-  header.append(roomPill);
-  screen.append(header);
+  if (role === "host") {
+    const header = element("div", "game-header");
+    const viewLabel = element("div", "");
+    viewLabel.append(element("p", "eyebrow", "HOST VIEW"));
+    header.append(viewLabel);
+    const roomPill = element("span", "room-pill", "ROOM " + state.room_code);
+    header.append(roomPill);
+    screen.append(header);
+  }
 
   if (state.phase === "lobby") {
     const section = element("section", "card game-card");
@@ -249,6 +280,29 @@ function renderGame(state) {
     players.append(element("h2", "", "Players"));
     addScoreboard(players, state.players);
     screen.append(players);
+  }
+
+  if (role === "player" && reconnectCode) {
+    const recovery = element("section", "reconnect-card");
+    const instructions = element(
+      "p",
+      "reconnect-instructions",
+      "Save this code to return to your player seat if the game needs to be restarted."
+    );
+    const code = element("strong", "reconnect-code", reconnectCode);
+    const copy = button("Copy reconnect code", "outline", async () => {
+      try {
+        await navigator.clipboard.writeText(reconnectCode);
+        showError("Reconnect code copied.");
+        screen.querySelector(".error").classList.add("success");
+      } catch (error) {
+        showError(
+          "Copy unavailable. Write down reconnect code " + reconnectCode + "."
+        );
+      }
+    });
+    recovery.append(instructions, code, copy);
+    screen.append(recovery);
   }
 }
 
@@ -287,13 +341,14 @@ function renderQuestion(state) {
         disabled = disabled || hasAnswered || question.answers.length < 3;
       } else if (powerup.key === "scout") {
         disabled = disabled || hasAnswered || !state.scout_available;
-      } else if (powerup.key === "call_friend" || powerup.key === "hide_answers") {
+      } else if (powerup.key === "hide_answers") {
+        disabled = disabled || hasAnswered || !state.hide_answers_available;
+      } else if (powerup.key === "call_friend" || powerup.key === "second_chance") {
         disabled = disabled || hasAnswered;
       }
 
       const item = element("div", "powerup-item");
-      const active = (powerup.key === "second_chance" && state.can_change_answer)
-        || (powerup.key === "hide_answers" && state.hide_answers);
+      const active = powerup.key === "second_chance" && state.can_change_answer;
       const buttonLabel = active
         ? powerup.name + " · ACTIVE"
         : powerup.name + (used ? " · USED" : "");
@@ -307,6 +362,8 @@ function renderQuestion(state) {
         useButton.title = "50:50 requires at least three answer choices.";
       } else if (powerup.key === "scout" && !state.scout_available) {
         useButton.title = "Scout is available after another player has answered.";
+      } else if (powerup.key === "hide_answers" && !state.hide_answers_available) {
+        useButton.title = "Memory test needs another player who has not locked an answer.";
       }
       item.append(useButton, element("p", "powerup-description", powerup.description));
       grid.append(item);
@@ -329,8 +386,20 @@ function renderQuestion(state) {
     if (state.phase === "revealed") {
       if (index === state.correct_answer_index) style += " correct";
       else if (index === state.your_answer) style += " incorrect";
+    } else if (
+      state.phase === "question"
+      && state.second_chance_wrong_answer
+      && index === state.your_answer
+    ) {
+      style += " incorrect";
     }
-    if (state.phase === "question" && state.your_answer === index) style += " selected";
+    if (
+      state.phase === "question"
+      && state.your_answer === index
+      && !state.second_chance_wrong_answer
+    ) {
+      style += " selected";
+    }
     let label = state.hide_answers
       ? String.fromCharCode(65 + index)
       : String.fromCharCode(65 + index) + ".  " + text;
@@ -351,6 +420,7 @@ function renderQuestion(state) {
     option.disabled = role === "host"
       || state.phase !== "question"
       || (state.your_answer !== undefined && !state.can_change_answer)
+      || (state.second_chance_wrong_answer && index === state.your_answer)
       || eliminated;
     answers.append(option);
   });
@@ -360,7 +430,7 @@ function renderQuestion(state) {
     const note = element(
       "p",
       "second-chance-note",
-      "Everyone has answered. Second Chance closes in " + state.second_chance_seconds + " seconds."
+      "A Second Chance retry closes in " + state.second_chance_seconds + " seconds."
     );
     if (powerupPanel) powerupPanel.append(note);
     else section.append(note);
@@ -376,21 +446,24 @@ function renderQuestion(state) {
     }
   } else if (role === "player") {
     let message = "Choose your answer. You can only answer once.";
-    if (state.can_change_answer) {
+    if (state.second_chance_wrong_answer) {
+      message = "That guess is wrong. Choose a different answer for your second guess.";
+    } else if (state.can_change_answer) {
       message = state.your_answer !== undefined
-        ? "Second Chance active. Choose a replacement answer once."
-        : "Second Chance active. You may change your answer once before the reveal.";
+        ? "Second Chance active. You may still change your answer once."
+        : "Second Chance active. If your first guess is wrong, you may guess again.";
     } else if (state.your_answer !== undefined) {
       message = "Answer locked in. Waiting for the reveal…";
     }
     section.append(element("p", "muted center", message));
   }
 
-  if (role === "host" && state.mode === "manual") {
+  if (role === "host" && (state.mode === "manual" || state.phase === "question")) {
     const controls = element("div", "host-controls");
     if (state.phase === "question") {
-      controls.append(button("Reveal answer", "primary", () => hostAction("reveal")));
-    } else {
+      const label = state.mode === "auto" ? "Reveal now" : "Reveal answer";
+      controls.append(button(label, "primary", () => hostAction("reveal")));
+    } else if (state.mode === "manual") {
       const text = question.number === question.total ? "Finish quiz" : "Next question";
       controls.append(button(text, "primary", () => hostAction("next")));
     }
@@ -409,6 +482,9 @@ function addScoreboard(container, players) {
   players.slice().sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).forEach(player => {
     const row = element("li", "player-row");
     row.append(element("span", "player-name", player.name));
+    if (role === "host" && player.reconnect_code) {
+      row.append(element("span", "host-reconnect-code", "REJOIN " + player.reconnect_code));
+    }
     row.append(element("span", "player-score", player.score + " pts"));
     if (player.has_answered) row.append(element("span", "answered-tag", "ANSWERED"));
     list.append(row);
@@ -448,7 +524,11 @@ async function refreshState() {
   try {
     const query = new URLSearchParams({ room: activeRoom });
     if (role === "player") query.set("player", playerId);
-    const response = await fetch("/api/state?" + query.toString(), { cache: "no-store" });
+    const headers = role === "host" ? { "X-Host-Token": hostToken } : {};
+    const response = await fetch("/api/state?" + query.toString(), {
+      headers,
+      cache: "no-store"
+    });
     const state = await response.json();
     if (!response.ok) throw new Error(state.error || "Could not load the game.");
     if (role === "host" && !hostToken) throw new Error("Host session was lost. Start a new room.");
@@ -506,6 +586,7 @@ function restoreSession() {
   activeRoom = sessionStorage.getItem(storageKeys.room) || "";
   role = sessionStorage.getItem(storageKeys.role) || "";
   playerId = sessionStorage.getItem(storageKeys.player) || "";
+  reconnectCode = sessionStorage.getItem(storageKeys.reconnect) || "";
   hostToken = sessionStorage.getItem(storageKeys.host) || "";
   if (activeRoom && role && (role === "host" ? hostToken : playerId)) {
     startPolling();
