@@ -302,27 +302,26 @@ class QuizRoomTests(unittest.TestCase):
         with self.assertRaisesRegex(RequestError, "already answered"):
             self.room.submit_answer(self.player_id, 0)
 
-    def test_memory_test_hides_answers_for_a_random_other_player(self):
+    def test_memory_test_hides_answers_for_all_eligible_other_players(self):
         room = QuizRoom("MEMRY", validate_quiz(VALID_QUIZ), "host-secret")
         first_player = room.add_player("First")
         second_player = room.add_player("Second")
+        third_player = room.add_player("Third")
         room.host_action("host-secret", "start")
 
-        with patch("app.random.choice", return_value=second_player) as choose:
-            room.activate_powerup(first_player, "hide_answers")
+        room.activate_powerup(first_player, "hide_answers")
 
-        self.assertEqual(
-            choose.call_args.args,
-            ([second_player],),
-        )
         activator_state = room.public_state(first_player)
         hidden_state = room.public_state(second_player)
+        third_hidden_state = room.public_state(third_player)
         self.assertFalse(activator_state["hide_answers"])
         self.assertEqual(
             activator_state["question"]["answers"], ["Wrong", "Right"]
         )
         self.assertTrue(hidden_state["hide_answers"])
         self.assertEqual(hidden_state["question"]["answers"], [None, None])
+        self.assertTrue(third_hidden_state["hide_answers"])
+        self.assertEqual(third_hidden_state["question"]["answers"], [None, None])
         self.assertIn("hide_answers", activator_state["used_powerups"])
         self.assertNotIn("hide_answers", hidden_state["used_powerups"])
         self.assertTrue(hidden_state["hide_answers_available"])
@@ -361,10 +360,8 @@ class QuizRoomTests(unittest.TestCase):
         room.host_action("host-secret", "start")
         room.submit_answer(answered_player, 0)
 
-        with patch("app.random.choice", return_value=available_player) as choose:
-            room.activate_powerup(first_player, "hide_answers")
+        room.activate_powerup(first_player, "hide_answers")
 
-        self.assertEqual(choose.call_args.args, ([available_player],))
         self.assertFalse(room.public_state(first_player)["hide_answers"])
         self.assertFalse(room.public_state(answered_player)["hide_answers"])
         self.assertTrue(room.public_state(available_player)["hide_answers"])

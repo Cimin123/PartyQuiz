@@ -140,7 +140,7 @@ PLAYER_POWERUPS = (
     {
         "key": "hide_answers",
         "name": "Memory test",
-        "description": "Hide the answer text for one other random player until the reveal.",
+        "description": "Hide the answer text for all other eligible players until the reveal.",
     },
 )
 PLAYER_POWERUP_KEYS = {powerup["key"] for powerup in PLAYER_POWERUPS}
@@ -992,8 +992,8 @@ class QuizRoom:
                         "Memory test requires another player who has not locked an answer.",
                         409,
                     )
-                target_id = random.choice(eligible_targets)
-                self.players[target_id]["hide_answers"] = True
+                for target_id in eligible_targets:
+                    self.players[target_id]["hide_answers"] = True
             elif is_second_chance:
                 player["can_change_answer"] = True
 
